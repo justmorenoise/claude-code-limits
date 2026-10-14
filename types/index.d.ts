@@ -11,7 +11,8 @@ export type LastResponse = {
 }
 
 /** The latest context fill and usage windows, for the band's bars. */
-export type Meters = { context: number | null; rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[] }
+/** After a compaction and until the next response the context is a local count (`isEstimate`), or not known (`isPending`). */
+export type Meters = { context: number | null; isEstimate?: boolean; isPending?: boolean; rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[] }
 
 /** The session's keepwarm switch, its next ping and the end of the window pings may run in, in $.clock.now() ms. */
 export type Keepwarm = { isOn: boolean; nextPingAt: number | null; stopped: string | null; windowEnd: number }

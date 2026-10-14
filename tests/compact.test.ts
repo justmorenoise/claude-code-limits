@@ -14,7 +14,12 @@ type Compacted = { messages: typeof SUMMARY } | { skip: string }
 /** A session past 250k tokens, so the band offers Compact now; `compact` answers each session.compact. */
 async function fakeSession($: Engine, on: On, compact: () => Promise<Compacted>) {
   const toasts: string[] = []
+  const submitted: string[] = []
   let compactions = 0
+  on('command.run', { command: 'compact' }, (_, e) => {
+    submitted.push(String(e.args ?? ''))
+    return { text: '' }
+  })
   on('store.get', () => ({ value: undefined }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 1_000_000, percent: 27 }, rateLimits: [] } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -32,7 +37,7 @@ async function fakeSession($: Engine, on: On, compact: () => Promise<Compacted>)
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('turn.complete', () => ({ text: '' }))
   await $.session.measure({ context: { window: 1_000_000, percent: 27, tokens: 268_000 }, rateLimits: [], changed: ['context'] })
-  return { toasts, compactions: () => compactions }
+  return { toasts, submitted, compactions: () => compactions }
 }
 
 const deferred = <T,>() => {
@@ -42,7 +47,7 @@ const deferred = <T,>() => {
 }
 
 for (const surface of SURFACES) {
-  test(`${surface}: Compact now shows the compaction at once and brings the button back when it ends`, async ($, on) => {
+  test(`${surface}: Compact now shows the compaction at once and ends it when the compaction does`, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     const done = deferred<Compacted>()
     const { toasts, compactions } = await fakeSession($, on, () => done.promise)
@@ -59,7 +64,8 @@ for (const surface of SURFACES) {
     done.resolve({ messages: SUMMARY })
     await clock.advance(0)
     expect(toasts).toContain(STRINGS.compacted)
-    expect(await ui.find({ key: 'compact' })).toBeDefined()
+    expect(await ui.find({ text: STRINGS.compacting })).toBeUndefined()
+    expect(await ui.find({ text: STRINGS.contextPending })).toBeDefined()
   })
 }
 
@@ -100,20 +106,21 @@ test('refused while a turn runs, the compaction queues and runs when the turn en
   await clock.advance(1500)
   expect(compactions()).toBe(2)
   expect(toasts).toContain(STRINGS.contextCompacted(27))
-  expect(await ui.find({ key: 'compact' })).toBeDefined()
+  expect(await ui.find({ text: STRINGS.compacting })).toBeUndefined()
 })
 
-test('refused with no turn running, the press reports the failure and the button comes back', async ($, on) => {
+test('refused with no turn running, the press falls back to /compact', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { toasts } = await fakeSession($, on, async () => {
+  const { toasts, submitted } = await fakeSession($, on, async () => {
     throw new Error('nothing to compact')
   })
   const ui = await $.ui.mount({ plugin: 'limits', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
 
   await ui.press({ key: 'compact' })
   await clock.advance(0)
-  expect(toasts.some(t => t.startsWith(STRINGS.compactFailed('')))).toBe(true)
-  expect(await ui.find({ key: 'compact' })).toBeDefined()
+  expect(submitted).toEqual([STRINGS.compactInstructions])
+  expect(toasts.some(t => t.startsWith(STRINGS.compactFailed('')))).toBe(false)
+  expect(await ui.find({ text: STRINGS.compacting })).toBeDefined()
 })
 
 test('a compaction left running by a reload is cleared when the session starts', async ($, on) => {

@@ -73,6 +73,7 @@ A warning not below the limit, or a value out of range, falls back to the defaul
 ## Notes
 
 - On the desktop app bars are drawn as SVG; in the terminal they fall back to colored cells.
+- Where Claude Code does not let a mod compact directly (the desktop app's Code tab, the SDK), **Compact now** and auto-compaction run `/compact` instead, with the same instructions.
 - The handoff runs `/clear` from the mod. If your Claude Code refuses it, the summary stays on screen with a note to clear and paste it yourself.
 
 ## Development

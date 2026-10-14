@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Hook, Register, RenderNode, RenderSurface, Timer } from 'claude-code'
+import type { EngineInterface, Hook, Register, RenderNode, RenderSurface, SessionCompactResult, Timer } from 'claude-code'
 
 import type { Compaction, Handoff, Keepwarm, LastResponse, Meters, Warned } from '../types'
 import { handoffMessage, handoffPrompt, isDismissal } from './handoff'
 import { isWarmPing, keepwarmNote, PING_PROMPT, pingDelay, WINDOW_MS } from './keepwarm'
-import { cacheLeft, exhaustedUntil, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
+import { cacheLeft, exhaustedUntil, liveLimit, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
 import { DEFAULTS, readThresholds, stepThreshold } from './settings'
 import type { Thresholds } from './settings'
 import { duration, grouped, label, STRINGS } from './strings'
@@ -52,7 +52,14 @@ function cancelPing() {
 // that installs counts: a precompute changes nothing, and the mod's own cancel the ping where they run.
 const onCompact: Hook<'session.compact'> = async ($, e, next) => {
   const result = await next(e)
-  if (e.agentId === undefined && !('skip' in result)) await markCompacted($)
+  if (e.agentId !== undefined) return result
+  if (!('skip' in result)) await markCompacted($)
+  // The /compact turn the mod sent has run: the band's compaction is over, whatever it came to.
+  if (promptedTimer !== undefined) {
+    promptedTimer.cancel()
+    promptedTimer = undefined
+    await update($, compaction, () => 'idle')
+  }
   return result
 }
 
@@ -61,6 +68,20 @@ async function markCompacted($: EngineInterface) {
   cancelPing()
   await update($, lastResponse, r => (r === null ? r : { ...r, isCompacted: true }))
   await update($, keepwarm, s => ({ ...s, nextPingAt: null }))
+  await estimateContext($)
+}
+
+/**
+ * Right after a compaction no response has measured the new window, so the engine has no fill to report:
+ * a local count stands in until the next response, rather than the figures from before it.
+ */
+async function estimateContext($: EngineInterface) {
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
+  const total = usage?.context.breakdown?.totalTokens
+  const window = usage?.context.window ?? 0
+  const isKnown = total !== undefined && window > 0
+  await update($, meters, m => ({ ...m, context: isKnown ? (total / window) * 100 : null, isEstimate: isKnown, isPending: !isKnown }))
+  await update($, contextTokens, () => (isKnown ? total : 0))
 }
 
 /** A turn of yours restarts the 6h window in which pings may run. */
@@ -193,13 +214,51 @@ async function arm($: EngineInterface, at: number) {
 }
 
 const COMPACT_RETRIES = 3
+// Where the engine refuses a plugin's compaction with no turn running (a headless session: the desktop app's
+// Code tab, the SDK), the session compacts by running /compact from then on, as the person's own would.
+let compactsByPrompt = false
+let promptedTimer: Timer | undefined
+// A /compact that never reports back must not leave the band on "Compacting…".
+const PROMPTED_TIMEOUT_MS = 5 * 60_000
+
+/**
+ * The compaction itself, or 'prompted' when /compact was run instead: it reports through session.compact.
+ * A refusal while a turn runs is rethrown, for the caller to queue or retry; `isLastTry` lets one with no
+ * turn running fall back to the /compact turn.
+ */
+async function runCompaction($: EngineInterface, isLastTry = true): Promise<SessionCompactResult | 'prompted'> {
+  if (!compactsByPrompt) {
+    try {
+      return await $.session.compact({ instructions: STRINGS.compactInstructions })
+    } catch (err) {
+      if (isTurnRunning || !isLastTry) throw err
+      $.ui.log(`limits: compacting by /compact turns: ${errorText(err)}`, { to: 'debug' })
+      compactsByPrompt = true
+    }
+  }
+  // Armed before the command runs: its compaction may report back before the call returns.
+  promptedTimer?.cancel()
+  promptedTimer = $.clock.after(PROMPTED_TIMEOUT_MS, () => {
+    promptedTimer = undefined
+    void update($, compaction, s => (s === 'running' ? 'idle' : s))
+  })
+  try {
+    await $.command.run({ command: 'compact', args: STRINGS.compactInstructions })
+  } catch (err) {
+    promptedTimer?.cancel()
+    promptedTimer = undefined
+    throw err
+  }
+  return 'prompted'
+}
 
 /** Compaction at the end of a turn: session.compact rejects while the turn settles, so it waits and retries. */
 async function compact($: EngineInterface, percent: number) {
   await update($, compaction, () => 'running')
   const attempt = (n: number) => $.clock.after(n === 0 ? 1500 : 5000, async () => {
     try {
-      const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
+      const done = await runCompaction($, n === COMPACT_RETRIES)
+      if (done === 'prompted') return
       if (!('skip' in done)) await markCompacted($)
       await update($, compaction, () => 'idle')
       if (!('skip' in done)) $.ui.toast(STRINGS.contextCompacted(percent))
@@ -230,7 +289,8 @@ async function compactNow($: EngineInterface) {
   }
   $.clock.after(0, async () => {
     try {
-      const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
+      const done = await runCompaction($)
+      if (done === 'prompted') return
       if (!('skip' in done)) await markCompacted($)
       await update($, compaction, () => 'idle')
       $.ui.toast('skip' in done ? STRINGS.compactSkipped(String(done.skip ?? '')) : STRINGS.compacted)
@@ -402,7 +462,9 @@ export const register: Register = (on, options) => {
     // The band shows the figures; the status line only speaks while a resume is pending.
     $.ui.status(pending === null ? undefined : STRINGS.resumingIn(duration(pending - t)))
 
-    await update($, meters, () => ({ context: e.context.percent ?? null, rateLimits: e.rateLimits }))
+    const isMeasured = e.context.percent !== undefined
+    // A measure with no fill (the window after a compaction) keeps the estimate the compaction left.
+    await update($, meters, m => (isMeasured ? { context: e.context.percent ?? null, rateLimits: e.rateLimits } : { ...m, rateLimits: e.rateLimits }))
 
     const percent = e.context.percent ?? 0
     const isWarned = (await read($, warned)).context
@@ -412,9 +474,11 @@ export const register: Register = (on, options) => {
     }
     if (percent < warnAt() && isWarned) await update($, warned, w => ({ ...w, context: false }))
 
-    const tokens = e.context.tokens ?? 0
-    await update($, contextTokens, () => tokens)
-    await warnTokens($, tokens)
+    if (e.context.tokens !== undefined) {
+      const tokens = e.context.tokens
+      await update($, contextTokens, () => tokens)
+      await warnTokens($, tokens)
+    }
 
     return next(e)
   })
@@ -573,8 +637,11 @@ export const register: Register = (on, options) => {
 
     const last = await read($, lastResponse)
     const tokens = await read($, contextTokens)
-    const { context, rateLimits } = await read($, meters)
+    const measured = await read($, meters)
+    const context = measured.context
+    const approx = measured.isEstimate ? '~' : ''
     const t = Math.max(await read($, now), last?.at ?? 0)
+    const rateLimits = measured.rateLimits.map(l => liveLimit(l, t))
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
 
@@ -595,7 +662,7 @@ export const register: Register = (on, options) => {
         ['cache', cachePercent, 'cache'],
       ]
       return (
-        <Box flexDirection="row" columnGap={3} paddingX={1} alignItems="center">
+        <Box flexDirection="row" columnGap={3} paddingLeft={1} alignItems="center">
           {bars.map(([title, percent, palette]) => (
             <Box key={title} width={0} flexGrow={1} minWidth={0}>
               {bar(ui, percent, palette, `${title} ${Math.round(percent)}%`, MINI_BAR_HEIGHT, 0)}
@@ -638,12 +705,15 @@ export const register: Register = (on, options) => {
     const isOver = tokens >= th.limitTokens
 
     return (
-      <Box flexDirection="column" paddingX={1}>
+      <Box flexDirection="column" paddingLeft={1}>
         <Box flexDirection="row" columnGap={3}>
-          {context !== null && card(ui, STRINGS.context, context, `${Math.round(context)}%`, `${thousands(tokens)} tokens`)}
+          {context === null
+            ? card(ui, STRINGS.context, 0, '–', measured.isPending ? STRINGS.contextPending : STRINGS.noResponse)
+            : card(ui, STRINGS.context, context, `${approx}${Math.round(context)}%`, `${approx}${thousands(tokens)} tokens`)}
           {rateLimits.map(limit =>
             card(ui, label(limit.kind), limit.percentUsed, `${Math.round(limit.percentUsed)}%`,
-              limit.resetsAt === undefined ? '' : `↺ ${duration(Date.parse(limit.resetsAt) - t)}`))}
+              limit.isReset ? `↺ ${STRINGS.windowReset}`
+                : limit.resetsAt === undefined ? '' : `↺ ${duration(Date.parse(limit.resetsAt) - t)}`))}
           {cacheCard}
           <Box flexDirection="column" justifyContent="space-between">
             <Button key="view-toggle" label="−" dimColor onPress={() => setMinimized($, true)} />

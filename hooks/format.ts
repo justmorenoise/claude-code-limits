@@ -10,6 +10,17 @@ export const exhaustedUntil = (limits: readonly SessionRateLimit[]): number | nu
   return resets.length === 0 ? null : Math.max(...resets)
 }
 
+/**
+ * A usage window as of `now`. Its figures come with each response, so one whose reset has passed since is
+ * a fresh window: 0%, no reset time, until the next figures arrive.
+ */
+export const liveLimit = <L extends { percentUsed: number; resetsAt?: string }>(limit: L, now: number): L & { isReset: boolean } => {
+  const at = limit.resetsAt === undefined ? Number.NaN : Date.parse(limit.resetsAt)
+  return !Number.isNaN(at) && at <= now
+    ? { ...limit, percentUsed: 0, resetsAt: undefined, isReset: true }
+    : { ...limit, isReset: false }
+}
+
 export const thousands = (tokens: number): string => `${Math.round(tokens / 1000)}k`
 
 /** Milliseconds the cache stays warm after a response at `at`; 0 once it has expired. */

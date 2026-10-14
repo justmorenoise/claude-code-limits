@@ -136,9 +136,9 @@ const STATES: Record<string, { state: State; height: number }> = {
 const CSS = `
 *{box-sizing:border-box;margin:0}
 body{background:#141414;padding:8px;font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:#e8e8e8;-webkit-font-smoothing:antialiased}
-.band{background:#232323;border-radius:12px;padding:12px 16px}
+.band{background:#232323;border-radius:12px;padding:12px 8px 12px 16px}
 .cards{display:flex;gap:24px}
-.band.slim{padding:6px 16px}
+.band.slim{padding:6px 8px 6px 16px}
 .cards.center{align-items:center}
 .mini{flex:1 1 0;min-width:0;display:flex}
 .side{display:flex;flex-direction:column;justify-content:space-between;align-items:center}

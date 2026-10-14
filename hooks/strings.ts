@@ -37,6 +37,7 @@ type Strings = {
   handoffOpen: string
   handoffPaneTitle: string
   noSummary: string
+  windowReset: string
   resumingIn: (d: string) => string
   limitReset: string
   limitHit: (d: string) => string
@@ -67,6 +68,7 @@ type Strings = {
   pingFailed: (reason: string) => string
   cacheGone: string
   cacheCompacted: string
+  contextPending: string
   settingsDescription: string
   settingsOpened: string
   settingsTitle: string
@@ -112,6 +114,7 @@ export const STRINGS: Strings = {
   handoffOpen: 'Open',
   handoffPaneTitle: 'Handoff summary',
   noSummary: 'No summary under review.',
+  windowReset: 'reset',
   resumingIn: d => `resuming in ${d}`,
   limitReset: 'Limit reset: resuming work',
   limitHit: d => `Usage limit reached: resuming by itself in ${d}`,
@@ -142,6 +145,7 @@ export const STRINGS: Strings = {
   pingFailed: reason => `ping failed (${reason})`,
   cacheGone: 'cache already expired',
   cacheCompacted: 'rewritten by compaction',
+  contextPending: 'compacted, measured on the next response',
   settingsDescription: 'Opens the limits settings: warning thresholds, auto-compaction, cache TTL, keepwarm',
   settingsOpened: 'Settings opened in a pane',
   settingsTitle: 'limits settings',

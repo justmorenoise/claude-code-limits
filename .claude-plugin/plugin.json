@@ -1,6 +1,6 @@
 {
   "name": "limits",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Usage band for Claude Code: context, 5h/7d limits and prompt cache as step-colored bars; keepwarm for the cache; handoff to a clean conversation after review; auto-compaction and auto-resume after a usage limit.",
   "author": {
     "name": "justmorenoise",
