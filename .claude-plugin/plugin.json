@@ -1,0 +1,36 @@
+{
+  "name": "limits",
+  "version": "1.0.0",
+  "description": "Usage band for Claude Code: context, 5h/7d limits and prompt cache as step-colored bars; keepwarm for the cache; handoff to a clean conversation after review; auto-compaction and auto-resume after a usage limit.",
+  "author": {
+    "name": "justmorenoise",
+    "url": "https://github.com/justmorenoise"
+  },
+  "homepage": "https://github.com/justmorenoise/claude-code-limits",
+  "repository": "https://github.com/justmorenoise/claude-code-limits",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache TTL",
+      "description": "How long the cache stays warm after the last response",
+      "default": "1h",
+      "options": [
+        "5m",
+        "1h"
+      ]
+    },
+    "language": {
+      "type": "string",
+      "title": "Language / Lingua",
+      "description": "auto follows Claude Code's language setting, then the system locale",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "it"
+      ]
+    }
+  }
+}
