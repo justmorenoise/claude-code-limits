@@ -8,7 +8,7 @@ A Claude Code mod that puts your usage above the prompt, and helps you act on it
 - **Context guard**: warnings at 250k and 300k tokens, a **Compact now** button, and automatic compaction at the end of a turn above 85% of the window.
 - **Auto-resume**: when a turn stops on a usage limit, the mod waits for the reset and continues the work by itself.
 
-Italian and English. Reset times read as in Claude's own usage panel: `2 hr 23 min`, `4 d 16 hr` (`2 h 23 min`, `4 g 16 h` in Italian).
+Reset times read as in Claude's own usage panel: `2 hr 23 min`, `4 d 16 hr`.
 
 ## Install
 
@@ -23,13 +23,12 @@ claude plugin install limits@justmorenoise
 
 | Option | Values | Default |
 | --- | --- | --- |
-| `language` | `auto`, `en`, `it` | `auto`: Claude Code's `language` setting, then the system locale |
 | `cacheTtl` | `1h`, `5m` | `1h` |
 
-Set them when installing, or later in `settings.json`:
+Set it when installing, or later in `settings.json`:
 
 ```json
-{ "pluginConfigs": { "limits": { "language": "it", "cacheTtl": "1h" } } }
+{ "pluginConfigs": { "limits": { "options": { "cacheTtl": "1h" } } } }
 ```
 
 ## Notes

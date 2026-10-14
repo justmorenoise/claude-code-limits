@@ -1,5 +1,4 @@
-import { duration, STRINGS } from './i18n'
-import type { Lang } from './i18n'
+import { duration, STRINGS } from './strings'
 
 /** Pings stop this long after the last turn of yours, so a forgotten session does not ping forever. */
 export const WINDOW_MS = 6 * 60 * 60_000
@@ -11,7 +10,7 @@ export const pingDelay = (ttlMs: number): number => Math.round((ttlMs * 5) / 6)
 /** A warm ping reads the prefix and writes little: a write of a tenth of the read or more means the cache was gone. */
 export const isWarmPing = (read: number, write: number): boolean => read > 0 && write < 0.1 * read
 
-export const keepwarmNote = (s: { isOn: boolean; nextPingAt: number | null; stopped: string | null }, now: number, lang: Lang): string => {
-  const t = STRINGS[lang]
-  return !s.isOn ? '' : s.stopped ? t.keepwarmStopped(s.stopped) : s.nextPingAt ? t.pingIn(duration(s.nextPingAt - now, lang)) : t.keepwarmWaiting
+export const keepwarmNote = (s: { isOn: boolean; nextPingAt: number | null; stopped: string | null }, now: number): string => {
+  const t = STRINGS
+  return !s.isOn ? '' : s.stopped ? t.keepwarmStopped(s.stopped) : s.nextPingAt ? t.pingIn(duration(s.nextPingAt - now)) : t.keepwarmWaiting
 }

@@ -9,8 +9,8 @@ test('a ping lands before the cache expires and only a cheap read counts as warm
   expect(pingDelay(60 * MIN)).toBe(50 * MIN)
   expect(isWarmPing(100_000, 200)).toBe(true)
   expect(isWarmPing(0, 100_000)).toBe(false)
-  expect(keepwarmNote({ isOn: true, nextPingAt: NOW + 32 * MIN, stopped: null }, NOW, 'it')).toBe('ping tra 32 min')
-  expect(keepwarmNote({ isOn: false, nextPingAt: null, stopped: null }, NOW, 'en')).toBe('')
+  expect(keepwarmNote({ isOn: true, nextPingAt: NOW + 32 * MIN, stopped: null }, NOW)).toBe('ping in 32 min')
+  expect(keepwarmNote({ isOn: false, nextPingAt: null, stopped: null }, NOW)).toBe('')
 })
 
 test('with keepwarm on, a ping goes out 50 minutes after a turn and again after the ping', async ($, on) => {

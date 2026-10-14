@@ -14,10 +14,10 @@ export type Keepwarm = { isOn: boolean; nextPingAt: number | null; stopped: stri
 export type Handoff = {
   phase: 'idle' | 'writing' | 'review' | 'starting'
   text: string | null
-  /** The priorities field under the Handoff button is open. */
-  isAsking: boolean
   /** The first row of the summary the review window shows. */
   scroll: number
+  /** The review shows the summary; collapsed, one line with its length and the start button. */
+  isExpanded: boolean
 }
 
 declare module 'claude-code' {
