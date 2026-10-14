@@ -20,6 +20,9 @@ export type Handoff = {
   isExpanded: boolean
 }
 
+/** Compaction from the band: idle, running now, or queued for the end of the turn under way. */
+export type Compaction = 'idle' | 'running' | 'queued'
+
 declare module 'claude-code' {
   interface PluginState {
     limits: {
@@ -30,6 +33,7 @@ declare module 'claude-code' {
       meters: Meters
       keepwarm: Keepwarm
       handoff: Handoff
+      compaction: Compaction
     }
   }
 }

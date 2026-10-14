@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderSurface, Timer } from 'claude-code'
+import type { EngineInterface, Hook, Register, RenderSurface, Timer } from 'claude-code'
 
-import type { Handoff, Keepwarm, LastResponse, Meters } from '../types'
+import type { Compaction, Handoff, Keepwarm, LastResponse, Meters } from '../types'
 import { handoffMessage, handoffPrompt, isDismissal, reviewWindow } from './handoff'
 import { isWarmPing, keepwarmNote, PING_PROMPT, pingDelay, WINDOW_MS } from './keepwarm'
 import { cacheLeft, exhaustedUntil, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
@@ -35,12 +35,23 @@ const keepwarm = atom({ plugin: 'limits', key: 'keepwarm' } as const, { isOn: fa
 let hasWarned = false
 let hasWarnedTokens = false
 let hasWarnedOverLimit = false
-let isCompacting = false
+// In state rather than a variable, so the band redraws as a compaction starts, queues and ends.
+const compaction = atom({ plugin: 'limits', key: 'compaction' } as const, 'idle' as Compaction)
+// Set from prompt.submit to turn.complete: tells a compaction refused because a turn runs from one that failed.
+let isTurnRunning = false
 let cacheTtlMs = 60 * 60_000
 
 function cancelPing() {
   pingTimer?.cancel()
   pingTimer = undefined
+}
+
+// Compaction rewrites the prefix: the next turn writes a new cache and schedules again. Only a compaction
+// that installs counts: a precompute changes nothing, and the mod's own cancel the ping where they run.
+const onCompact: Hook<'session.compact'> = async (_, e, next) => {
+  const result = await next(e)
+  if (e.agentId === undefined && !('skip' in result)) cancelPing()
+  return result
 }
 
 /** A turn of yours restarts the 6h window in which pings may run. */
@@ -166,37 +177,56 @@ async function arm($: EngineInterface, at: number) {
   })
 }
 
-function compact($: EngineInterface, percent: number, attempt = 0) {
-  // session.compact rejects while a turn runs: wait for turn.complete to settle.
-  $.clock.after(attempt === 0 ? 1500 : 5000, async () => {
+const COMPACT_RETRIES = 3
+
+/** Compaction at the end of a turn: session.compact rejects while the turn settles, so it waits and retries. */
+async function compact($: EngineInterface, percent: number) {
+  await update($, compaction, () => 'running')
+  const attempt = (n: number) => $.clock.after(n === 0 ? 1500 : 5000, async () => {
     try {
       const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
+      if (!('skip' in done)) cancelPing()
+      await update($, compaction, () => 'idle')
       if (!('skip' in done)) $.ui.toast(STRINGS.contextCompacted(percent))
-      isCompacting = false
-    } catch {
-      if (attempt < 3) compact($, percent, attempt + 1)
-      else isCompacting = false
+    } catch (err) {
+      if (n < COMPACT_RETRIES) return void attempt(n + 1)
+      await update($, compaction, () => 'idle')
+      $.ui.toast(STRINGS.compactFailed(errorText(err)))
     }
   })
+  attempt(0)
 }
 
-let isCompactQueued = false
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err ?? ''))
 
 // A press runs inside its own dispatch, where session.compact is refused: run it once the press returns,
 // and if a turn is running, at the end of that turn.
-function compactNow($: EngineInterface) {
-  if (isCompacting) return
+async function compactNow($: EngineInterface) {
+  // Checked and marked in one update before the dispatch returns: the band shows the compaction at once,
+  // and a second press, even one racing this one, finds it.
+  let was: Compaction = 'idle'
+  await update($, compaction, s => {
+    was = s
+    return s === 'idle' ? 'running' : s
+  })
+  if (was !== 'idle') {
+    $.ui.toast(was === 'running' ? STRINGS.compactRunning : STRINGS.compactQueued)
+    return
+  }
   $.clock.after(0, async () => {
-    if (isCompacting) return
-    isCompacting = true
     try {
       const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
+      if (!('skip' in done)) cancelPing()
+      await update($, compaction, () => 'idle')
       $.ui.toast('skip' in done ? STRINGS.compactSkipped(String(done.skip ?? '')) : STRINGS.compacted)
-    } catch {
-      isCompactQueued = true
-      $.ui.toast(STRINGS.compactQueued)
-    } finally {
-      isCompacting = false
+    } catch (err) {
+      if (isTurnRunning) {
+        await update($, compaction, () => 'queued')
+        $.ui.toast(STRINGS.compactQueued)
+      } else {
+        await update($, compaction, () => 'idle')
+        $.ui.toast(STRINGS.compactFailed(errorText(err)))
+      }
     }
   })
 }
@@ -288,6 +318,8 @@ export const register: Register = (on, options) => {
   cacheTtlMs = options.cacheTtl === '5m' ? 5 * 60_000 : 60 * 60_000
 
   on('session.start', async ($, e, next) => {
+    // A reload drops the timers of a compaction under way: what is left marked running would never end.
+    if ((await read($, compaction)) === 'running') await update($, compaction, () => 'idle')
     const at = await read($, resumeAt)
     if (at !== null && at < (await $.clock.now()) - STALE_RESUME_MS) await update($, resumeAt, () => null)
     else if (at !== null) void arm($, at)
@@ -331,6 +363,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    isTurnRunning = false
 
     const result = await next(e)
     const t = await $.clock.now()
@@ -363,16 +396,8 @@ export const register: Register = (on, options) => {
     }
 
     const percent = usage.context.percent ?? 0
-    if (isCompactQueued && !isCompacting) {
-      isCompactQueued = false
-      isCompacting = true
-      compact($, percent)
-      return result
-    }
-    if (e.reason === 'answer' && percent >= COMPACT_AT && !isCompacting) {
-      isCompacting = true
-      compact($, percent)
-    }
+    const state = await read($, compaction)
+    if (state === 'queued' || (state === 'idle' && e.reason === 'answer' && percent >= COMPACT_AT)) await compact($, percent)
 
     return result
   })
@@ -400,19 +425,17 @@ export const register: Register = (on, options) => {
       await update($, resumeAt, () => null)
       await update($, lastResponse, () => null)
       await update($, keepwarm, s => ({ ...s, nextPingAt: null, stopped: null }))
+      if ((await read($, compaction)) === 'queued') await update($, compaction, () => 'idle')
       $.ui.status(undefined)
     }
     return next(e)
   })
 
-  on('session.compact', async ($, e, next) => {
-    const result = await next(e)
-    // Compaction rewrites the prefix: the next turn writes a new cache and schedules again.
-    if (e.agentId === undefined) cancelPing()
-    return result
-  })
+  on('session.compact', { trigger: 'manual' }, onCompact)
+  on('session.compact', { trigger: 'auto' }, onCompact)
 
   on('prompt.submit', async ($, e, next) => {
+    isTurnRunning = true
     const isOwn = e.origin?.kind === 'plugin'
     if (!isOwn) {
       cancelPing()
@@ -507,6 +530,7 @@ export const register: Register = (on, options) => {
           )
           : null
 
+    const compactState = await read($, compaction)
     const isOver = tokens >= TOKENS_LIMIT
     const isNear = tokens >= TOKENS_WARN
 
@@ -526,11 +550,13 @@ export const register: Register = (on, options) => {
                 ? STRINGS.overLimit(thousands(tokens), thousands(TOKENS_LIMIT))
                 : STRINGS.nearLimit(thousands(tokens), thousands(TOKENS_LIMIT))}
             </Text>
-            {e.props.isWorking || isCompactQueued
+            {compactState === 'running'
+              ? <Text dimColor>{STRINGS.compacting}</Text>
+              : e.props.isWorking || compactState === 'queued'
               ? <Text dimColor>{STRINGS.compactAtEnd}</Text>
               : (
                 <Box columnGap={2}>
-                  <Button key="compact" label={STRINGS.compactNow} onPress={() => compactNow($)} />
+                  <Button key="compact" label={STRINGS.compactNow} onPress={() => void compactNow($)} />
                   {(ho.phase === 'idle' || ho.phase === 'review') && (
                     // Handoff and its + read as one control: a narrower gap than between the actions.
                     <Box columnGap={1}>

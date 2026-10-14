@@ -44,6 +44,9 @@ type Strings = {
   compactSkipped: (why: string) => string
   compacted: string
   compactQueued: string
+  compacting: string
+  compactRunning: string
+  compactFailed: (why: string) => string
   tokensOver: (tokens: string, limit: string) => string
   tokensNear: (tokens: string, limit: string) => string
   handoffFailed: (reason: string) => string
@@ -99,6 +102,9 @@ export const STRINGS: Strings = {
   compactSkipped: why => `Compaction skipped: ${why}`,
   compacted: 'Context compacted',
   compactQueued: 'Turn running: compacting as soon as it ends',
+  compacting: 'Compacting…',
+  compactRunning: 'Already compacting: the summary is on its way',
+  compactFailed: why => `Compaction failed${why ? `: ${why}` : ''}`,
   tokensOver: (tokens, limit) => `Context at ${tokens} tokens: over ${limit} without compacting`,
   tokensNear: (tokens, limit) => `Context at ${tokens} tokens: compact before ${limit}`,
   handoffFailed: reason => `Handoff failed${reason ? ` (${reason})` : ''}`,
