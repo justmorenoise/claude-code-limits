@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { handoffMessage, handoffPrompt, isDismissal, reviewWindow } from '../hooks/handoff'
+import { handoffMessage, handoffPrompt, isDismissal } from '../hooks/handoff'
 import { STRINGS } from '../hooks/strings'
 
 test('the handoff asks for the plan and state, and the new conversation resumes from it', async () => {
@@ -19,6 +19,7 @@ test('/handoff writes the summary with a fork and holds it for review', async ($
     state.set(e.key, e.value)
     return { value: { isSet: true, version: 2 } }
   })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
   on('model.fork', ($, e) => {
     forks.push(e.prompt)
     return { value: { isAnswered: true, text: '## Obiettivo\nfinire limits', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 0 } } }
@@ -28,20 +29,12 @@ test('/handoff writes the summary with a fork and holds it for review', async ($
   await clock.advance(0)
 
   expect(forks).toEqual([STRINGS.handoffPrompt])
-  expect(state.get('handoff')).toEqual({ phase: 'review', text: '## Obiettivo\nfinire limits', scroll: 0, isExpanded: false })
+  expect(state.get('handoff')).toEqual({ phase: 'review', text: '## Obiettivo\nfinire limits' })
 })
 
 test('priorities given to /handoff reach the prompt, and none leaves it as is', async () => {
   expect(handoffPrompt('  ')).toBe(STRINGS.handoffPrompt)
   expect(handoffPrompt('the deploy commands')).toContain('Give priority and more detail to the following, which I asked for: the deploy commands')
-})
-
-test('the review window moves through the summary and stops at its ends', async () => {
-  const text = Array.from({ length: 20 }, (_, i) => `riga ${i + 1}`).join('\n')
-  expect(reviewWindow(text, 0, 14)).toMatchObject({ from: 0, to: 14, total: 20, max: 6 })
-  expect(reviewWindow(text, 3, 14).text.split('\n')[0]).toBe('riga 4')
-  expect(reviewWindow(text, 99, 14)).toMatchObject({ from: 6, to: 20 })
-  expect(reviewWindow('breve', 5, 14)).toMatchObject({ from: 0, max: 0 })
 })
 
 test('closing the dialog is not an answer, typed text is', async () => {

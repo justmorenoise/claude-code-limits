@@ -2,22 +2,27 @@
 export type ResumeAt = number | null
 
 /** The main thread's last completed turn: when it ended and how its prompt met the cache. */
-export type LastResponse = { at: number; cacheRead: number; cacheWrite: number }
+export type LastResponse = {
+  at: number
+  cacheRead: number
+  cacheWrite: number
+  /** A compaction installed since: the next request writes a new prefix, so this cache is as good as cold. */
+  isCompacted?: boolean
+}
 
 /** The latest context fill and usage windows, for the band's bars. */
 export type Meters = { context: number | null; rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[] }
 
-/** The keepwarm switch and its next ping, in $.clock.now() ms. */
-export type Keepwarm = { isOn: boolean; nextPingAt: number | null; stopped: string | null }
+/** The session's keepwarm switch, its next ping and the end of the window pings may run in, in $.clock.now() ms. */
+export type Keepwarm = { isOn: boolean; nextPingAt: number | null; stopped: string | null; windowEnd: number }
 
-/** The handoff in progress: written by a fork, shown for review, then started in a cleared conversation. */
+/** Which warnings this session has shown, so each shows once until its figure drops back. */
+export type Warned = { context: boolean; tokens: boolean; overLimit: boolean }
+
+/** The handoff in progress: written by a fork, reviewed in its pane, then started in a cleared conversation. */
 export type Handoff = {
   phase: 'idle' | 'writing' | 'review' | 'starting'
   text: string | null
-  /** The first row of the summary the review window shows. */
-  scroll: number
-  /** The review shows the summary; collapsed, one line with its length and the start button. */
-  isExpanded: boolean
 }
 
 /** Compaction from the band: idle, running now, or queued for the end of the turn under way. */
@@ -34,6 +39,9 @@ declare module 'claude-code' {
       keepwarm: Keepwarm
       handoff: Handoff
       compaction: Compaction
+      warned: Warned
+      /** The band shows the bars alone, on one row. */
+      minimized: boolean
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "limits",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Usage band for Claude Code: context, 5h/7d limits and prompt cache as step-colored bars; keepwarm for the cache; handoff to a clean conversation after review; auto-compaction and auto-resume after a usage limit.",
   "author": {
     "name": "justmorenoise",
@@ -20,6 +20,24 @@
         "5m",
         "1h"
       ]
+    },
+    "warnTokens": {
+      "type": "number",
+      "title": "Warning at (tokens)",
+      "description": "Context size that shows the yellow warning with Compact now and Handoff",
+      "default": 250000
+    },
+    "limitTokens": {
+      "type": "number",
+      "title": "Limit at (tokens)",
+      "description": "Context size that turns the warning red; a warning only, it does not compact",
+      "default": 300000
+    },
+    "compactAt": {
+      "type": "number",
+      "title": "Auto-compact at (% of the window)",
+      "description": "Compacts at the end of a turn above this share of the context window, 50 to 95",
+      "default": 85
     }
   }
 }

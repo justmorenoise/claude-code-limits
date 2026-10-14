@@ -14,11 +14,3 @@ export const handoffMessage = (summary: string): string =>
  */
 export const isDismissal = (answer: string): boolean =>
   answer.trim() === '' || /doesn'?t want to proceed|was rejected|user (declined|cancel+ed|dismissed)|tool use was/i.test(answer)
-
-/** The rows of `text` a window of `rows` shows from `offset`, the offset clamped so the window never runs past the end. */
-export const reviewWindow = (text: string, offset: number, rows: number) => {
-  const lines = text.split('\n')
-  const max = Math.max(0, lines.length - rows)
-  const from = Math.min(max, Math.max(0, offset))
-  return { text: lines.slice(from, from + rows).join('\n'), from, to: Math.min(lines.length, from + rows), total: lines.length, max }
-}

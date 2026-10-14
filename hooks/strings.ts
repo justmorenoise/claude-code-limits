@@ -34,7 +34,9 @@ type Strings = {
   handoffAskHeader: string
   /** The first option means no priorities; the others are passed on as they read. */
   handoffAskOptions: [string, string, string, string]
-  reviewRows: (from: number, to: number, total: number) => string
+  handoffOpen: string
+  handoffPaneTitle: string
+  noSummary: string
   resumingIn: (d: string) => string
   limitReset: string
   limitHit: (d: string) => string
@@ -64,6 +66,21 @@ type Strings = {
   pingNotSent: string
   pingFailed: (reason: string) => string
   cacheGone: string
+  cacheCompacted: string
+  settingsDescription: string
+  settingsOpened: string
+  settingsTitle: string
+  settingWarn: string
+  settingWarnNote: string
+  settingLimit: string
+  settingLimitNote: string
+  settingCompact: string
+  settingCompactNote: string
+  settingTtl: string
+  settingKeepwarm: string
+  settingsReset: string
+  settingsClose: string
+  settingFailed: (field: string) => string
   resumeText: string
   compactInstructions: string
   handoffPrompt: string
@@ -92,7 +109,9 @@ export const STRINGS: Strings = {
   handoffAskQuestion: 'What should the handoff keep in more detail?',
   handoffAskHeader: 'Handoff',
   handoffAskOptions: ['Everything equally', 'Decisions and their reasons', 'Files touched and git state', 'Commands and checks'],
-  reviewRows: (from, to, total) => `lines ${from}–${to} of ${total}`,
+  handoffOpen: 'Open',
+  handoffPaneTitle: 'Handoff summary',
+  noSummary: 'No summary under review.',
   resumingIn: d => `resuming in ${d}`,
   limitReset: 'Limit reset: resuming work',
   limitHit: d => `Usage limit reached: resuming by itself in ${d}`,
@@ -109,10 +128,10 @@ export const STRINGS: Strings = {
   tokensNear: (tokens, limit) => `Context at ${tokens} tokens: compact before ${limit}`,
   handoffFailed: reason => `Handoff failed${reason ? ` (${reason})` : ''}`,
   clearFailed: 'Could not run /clear: press Copy, run /clear and paste',
-  keepwarmOn: 'keepwarm on: one ping before the cache expires, for up to 6 hr after your last message',
+  keepwarmOn: 'keepwarm on for this session: one ping before the cache expires, for up to 6 hr after your last message',
   keepwarmOff: 'keepwarm off',
   handoffPreparing: 'Writing the handoff: it appears above the prompt for review',
-  keepwarmDescription: 'Keeps the prompt cache warm during breaks: on, off or toggle (limits)',
+  keepwarmDescription: 'Keeps this session\'s prompt cache warm during breaks: on, off or toggle (limits)',
   keepwarmHint: '[on | off]',
   handoffDescription: 'Summarizes the session and continues it in a clean conversation, after your review (limits)',
   handoffHint: '[what to keep]',
@@ -122,6 +141,21 @@ export const STRINGS: Strings = {
   pingNotSent: 'ping not sent',
   pingFailed: reason => `ping failed (${reason})`,
   cacheGone: 'cache already expired',
+  cacheCompacted: 'rewritten by compaction',
+  settingsDescription: 'Opens the limits settings: warning thresholds, auto-compaction, cache TTL, keepwarm',
+  settingsOpened: 'Settings opened in a pane',
+  settingsTitle: 'limits settings',
+  settingWarn: 'Warning at',
+  settingWarnNote: 'tokens: yellow line, Compact now and Handoff',
+  settingLimit: 'Limit at',
+  settingLimitNote: 'tokens: red warning only, no compaction',
+  settingCompact: 'Auto-compact at',
+  settingCompactNote: 'of the context window, at the end of a turn',
+  settingTtl: 'Cache TTL',
+  settingKeepwarm: 'keepwarm (session)',
+  settingsReset: 'Reset to defaults',
+  settingsClose: 'Close',
+  settingFailed: field => `Could not save ${field}`,
   resumeText: 'I hit my usage limit while you were working, but it has now reset. Continue where you left off.',
   compactInstructions:
     'Keep the current plan with the steps done and to do, the current step, the decisions made, ' +

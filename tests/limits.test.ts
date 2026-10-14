@@ -2,6 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { exhaustedUntil } from '../hooks/format'
+import { STRINGS } from '../hooks/strings'
 
 const RESET = '2026-10-06T14:00:00.000Z'
 const NOW = Date.parse('2026-10-06T11:50:00.000Z')
@@ -116,4 +117,22 @@ test('/clear drops a pending resume and the old cache', async ($, on) => {
 
   await clock.advance(Date.parse(RESET) - NOW + 120_000)
   expect(submitted).toEqual([])
+})
+
+test('each warning shows once until its figure drops back', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { toasts } = fakeSession(on, [])
+  on('session.measure', (_, e) => e)
+  const measure = (percent: number, tokens: number) =>
+    $.session.measure({ context: { window: 1_000_000, percent, tokens }, rateLimits: [], changed: ['context'] })
+
+  await measure(82, 260_000)
+  await measure(83, 265_000)
+  expect(toasts.filter(t => t.startsWith('Context at 82%'))).toHaveLength(1)
+  expect(toasts.filter(t => t === STRINGS.tokensNear('260k', '300k'))).toHaveLength(1)
+  expect(toasts).toHaveLength(2)
+
+  await measure(40, 100_000)
+  await measure(81, 255_000)
+  expect(toasts).toHaveLength(4)
 })

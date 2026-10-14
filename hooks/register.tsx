@@ -1,10 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Hook, Register, RenderSurface, Timer } from 'claude-code'
+import type { EngineInterface, Hook, Register, RenderNode, RenderSurface, Timer } from 'claude-code'
 
-import type { Compaction, Handoff, Keepwarm, LastResponse, Meters } from '../types'
-import { handoffMessage, handoffPrompt, isDismissal, reviewWindow } from './handoff'
+import type { Compaction, Handoff, Keepwarm, LastResponse, Meters, Warned } from '../types'
+import { handoffMessage, handoffPrompt, isDismissal } from './handoff'
 import { isWarmPing, keepwarmNote, PING_PROMPT, pingDelay, WINDOW_MS } from './keepwarm'
 import { cacheLeft, exhaustedUntil, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
+import { DEFAULTS, readThresholds, stepThreshold } from './settings'
+import type { Thresholds } from './settings'
 import { duration, grouped, label, STRINGS } from './strings'
 
 const resumeAt = atom({ plugin: 'limits', key: 'resumeAt' } as const, null)
@@ -13,10 +15,12 @@ const contextTokens = atom({ plugin: 'limits', key: 'contextTokens' } as const, 
 const now = atom({ plugin: 'limits', key: 'now' } as const, 0)
 const meters = atom({ plugin: 'limits', key: 'meters' } as const, { context: null, rateLimits: [] } as Meters)
 
-const WARN_AT = 80
-const COMPACT_AT = 85
-const TOKENS_WARN = 250_000
-const TOKENS_LIMIT = 300_000
+// From the options at each load; a change in the settings pane reloads the module with the new ones.
+let th: Thresholds = DEFAULTS
+let invalidOptions: string[] = []
+// The context warning comes a step before auto-compaction.
+const warnAt = () => th.compactAt - 5
+const SETTINGS_PANE = 'limits-settings'
 const RESUME_GRACE_MS = 60_000
 // Beyond the 5h window's reset, waiting means the weekly or spend limit: resuming by itself days later is not wanted.
 const MAX_RESUME_WAIT_MS = 5 * 60 * 60_000 + RESUME_GRACE_MS
@@ -25,16 +29,14 @@ const STALE_RESUME_MS = 10 * 60_000
 
 let timer: Timer | undefined
 let pingTimer: Timer | undefined
-let windowEnd = 0
-const handoff = atom({ plugin: 'limits', key: 'handoff' } as const, { phase: 'idle', text: null, scroll: 0, isExpanded: false } as Handoff)
-const IDLE_HANDOFF: Handoff = { phase: 'idle', text: null, scroll: 0, isExpanded: false }
-// Rows of the summary the review shows at once: the band sits above the prompt and must not push it off screen.
-const REVIEW_ROWS = 8
-const KEEPWARM_KEY = 'keepwarm'
-const keepwarm = atom({ plugin: 'limits', key: 'keepwarm' } as const, { isOn: false, nextPingAt: null, stopped: null } as Keepwarm)
-let hasWarned = false
-let hasWarnedTokens = false
-let hasWarnedOverLimit = false
+const handoff = atom({ plugin: 'limits', key: 'handoff' } as const, { phase: 'idle', text: null } as Handoff)
+const IDLE_HANDOFF: Handoff = { phase: 'idle', text: null }
+// The summary under review is read in a pane of its own: the engine scrolls it and draws its Markdown.
+const HANDOFF_PANE = 'limits-handoff'
+const keepwarm = atom({ plugin: 'limits', key: 'keepwarm' } as const, { isOn: false, nextPingAt: null, stopped: null, windowEnd: 0 } as Keepwarm)
+const minimized = atom({ plugin: 'limits', key: 'minimized' } as const, false)
+// In state, so a reload does not show the same warning again.
+const warned = atom({ plugin: 'limits', key: 'warned' } as const, { context: false, tokens: false, overLimit: false } as Warned)
 // In state rather than a variable, so the band redraws as a compaction starts, queues and ends.
 const compaction = atom({ plugin: 'limits', key: 'compaction' } as const, 'idle' as Compaction)
 // Set from prompt.submit to turn.complete: tells a compaction refused because a turn runs from one that failed.
@@ -48,33 +50,41 @@ function cancelPing() {
 
 // Compaction rewrites the prefix: the next turn writes a new cache and schedules again. Only a compaction
 // that installs counts: a precompute changes nothing, and the mod's own cancel the ping where they run.
-const onCompact: Hook<'session.compact'> = async (_, e, next) => {
+const onCompact: Hook<'session.compact'> = async ($, e, next) => {
   const result = await next(e)
-  if (e.agentId === undefined && !('skip' in result)) cancelPing()
+  if (e.agentId === undefined && !('skip' in result)) await markCompacted($)
   return result
+}
+
+/** The cached prefix is no longer what the next request sends: no ping for it, and the card reads it as cold. */
+async function markCompacted($: EngineInterface) {
+  cancelPing()
+  await update($, lastResponse, r => (r === null ? r : { ...r, isCompacted: true }))
+  await update($, keepwarm, s => ({ ...s, nextPingAt: null }))
 }
 
 /** A turn of yours restarts the 6h window in which pings may run. */
 async function openWindow($: EngineInterface) {
-  windowEnd = (await $.clock.now()) + WINDOW_MS
+  const t = await $.clock.now()
+  await update($, keepwarm, s => ({ ...s, windowEnd: t + WINDOW_MS }))
 }
 
 async function setKeepwarm($: EngineInterface, isOn: boolean) {
-  await $.store.set(KEEPWARM_KEY, isOn)
   if (!isOn) cancelPing()
-  await update($, keepwarm, () => ({ isOn, nextPingAt: null, stopped: null }))
+  await update($, keepwarm, s => ({ ...s, isOn, nextPingAt: null, stopped: null }))
   if (!isOn) return
   await openWindow($)
   const last = await read($, lastResponse)
-  if (last) await schedulePing($, last.at)
+  if (last && !last.isCompacted) await schedulePing($, last.at)
 }
 
 /** Schedules the next ping from `from`, the time the cache was last read or written. */
 async function schedulePing($: EngineInterface, from: number) {
   cancelPing()
-  if (!(await read($, keepwarm)).isOn) return
+  const { isOn, windowEnd } = await read($, keepwarm)
+  if (!isOn) return
   const at = from + pingDelay(cacheTtlMs)
-  if (at >= windowEnd) {
+  if (at >= (windowEnd ?? 0)) {
     await update($, keepwarm, s => ({ ...s, nextPingAt: null }))
     return
   }
@@ -114,21 +124,26 @@ async function writeHandoff($: EngineInterface, focus = '') {
     $.ui.toast(STRINGS.handoffFailed(reply === null ? '' : reply.reason))
     return
   }
-  await update($, handoff, (): Handoff => ({ ...IDLE_HANDOFF, phase: 'review', text: reply.text }))
+  await update($, handoff, (): Handoff => ({ phase: 'review', text: reply.text }))
+  await openSummary($)
 }
 
-async function scrollReview($: EngineInterface, by: number) {
-  const ho = await read($, handoff)
-  if (ho.text === null) return
-  const { max } = reviewWindow(ho.text, 0, REVIEW_ROWS)
-  await update($, handoff, (s): Handoff => ({ ...s, scroll: Math.min(max, Math.max(0, s.scroll + by)) }))
+// A pane refused or not placed is not a failed handoff: the band's Open asks for it again.
+async function openSummary($: EngineInterface) {
+  await $.ui.open({ id: HANDOFF_PANE, title: STRINGS.handoffPaneTitle, closeOnEscape: true }).catch(() => undefined)
 }
 
-// The surface's clipboard first; where it has none yet (a remote surface), the Mac's own.
+async function cancelHandoff($: EngineInterface) {
+  await update($, handoff, (): Handoff => IDLE_HANDOFF)
+  await $.ui.close({ id: HANDOFF_PANE }).catch(() => undefined)
+}
+
+// The surface's clipboard first; where it has none (the desktop app reaches the engine as a remote surface),
+// the clipboard of the Mac the engine runs on. Never for a phone: the text would land on the Mac, not in its hand.
 async function copyHandoff($: EngineInterface, text: string, surface: RenderSurface) {
   const viaUi = await $.ui.copy({ text, surface }).catch(() => null)
-  const isCopied = viaUi?.isCopied === true ||
-    (await $.process.run(['pbcopy'], { stdin: text, timeoutMs: 5000 }).then(r => r.exitCode === 0, () => false))
+  const isCopied = viaUi?.isCopied === true || (surface !== 'mobile' &&
+    (await $.process.run(['pbcopy'], { stdin: text, timeoutMs: 5000 }).then(r => r.exitCode === 0, () => false)))
   $.ui.toast(isCopied ? STRINGS.copied : STRINGS.copyFailed)
 }
 
@@ -158,7 +173,7 @@ function startHandoff($: EngineInterface) {
     }
     cancelPing()
     await update($, lastResponse, () => null)
-    await update($, handoff, (): Handoff => IDLE_HANDOFF)
+    await cancelHandoff($)
     await $.prompt.submit({ text: handoffMessage(text), asUser: true })
   })
 }
@@ -185,7 +200,7 @@ async function compact($: EngineInterface, percent: number) {
   const attempt = (n: number) => $.clock.after(n === 0 ? 1500 : 5000, async () => {
     try {
       const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
-      if (!('skip' in done)) cancelPing()
+      if (!('skip' in done)) await markCompacted($)
       await update($, compaction, () => 'idle')
       if (!('skip' in done)) $.ui.toast(STRINGS.contextCompacted(percent))
     } catch (err) {
@@ -216,7 +231,7 @@ async function compactNow($: EngineInterface) {
   $.clock.after(0, async () => {
     try {
       const done = await $.session.compact({ instructions: STRINGS.compactInstructions })
-      if (!('skip' in done)) cancelPing()
+      if (!('skip' in done)) await markCompacted($)
       await update($, compaction, () => 'idle')
       $.ui.toast('skip' in done ? STRINGS.compactSkipped(String(done.skip ?? '')) : STRINGS.compacted)
     } catch (err) {
@@ -232,20 +247,19 @@ async function compactNow($: EngineInterface) {
 }
 
 async function warnTokens($: EngineInterface, tokens: number) {
-  if (tokens < TOKENS_WARN) {
-    hasWarnedTokens = false
-    hasWarnedOverLimit = false
+  const was = await read($, warned)
+  if (tokens < th.warnTokens) {
+    if (was.tokens || was.overLimit) await update($, warned, w => ({ ...w, tokens: false, overLimit: false }))
     return
   }
-  if (tokens >= TOKENS_LIMIT && !hasWarnedOverLimit) {
-    hasWarnedOverLimit = true
-    hasWarnedTokens = true
-    $.ui.toast(STRINGS.tokensOver(thousands(tokens), thousands(TOKENS_LIMIT)), {
+  if (tokens >= th.limitTokens && !was.overLimit) {
+    await update($, warned, w => ({ ...w, tokens: true, overLimit: true }))
+    $.ui.toast(STRINGS.tokensOver(thousands(tokens), thousands(th.limitTokens)), {
       timeoutMs: 10_000,
     })
-  } else if (!hasWarnedTokens) {
-    hasWarnedTokens = true
-    $.ui.toast(STRINGS.tokensNear(thousands(tokens), thousands(TOKENS_LIMIT)))
+  } else if (!was.tokens) {
+    await update($, warned, w => ({ ...w, tokens: true }))
+    $.ui.toast(STRINGS.tokensNear(thousands(tokens), thousands(th.limitTokens)))
   }
 }
 
@@ -254,8 +268,11 @@ type Ui = ReturnType<EngineInterface['ui']['resolve']>
 const TRACK = '#3a3a3a'
 const BAR_HEIGHT = 4
 // Empty pixels under the bar: Box margins count in rows, too coarse to nudge the note by 2px.
-const BAR_SPACE_BELOW = 2
+const BAR_SPACE_BELOW = 4
 const SEGMENT_GAP = 1.2
+// The minimized band: bars alone, on one row.
+const MINI_BAR_HEIGHT = 3
+const MINIMIZED_KEY = 'minimized'
 
 type Palette = 'usage' | 'cache'
 
@@ -263,30 +280,38 @@ const colorAt = (palette: Palette, i: number) =>
   palette === 'usage' ? segmentColor(i) : warmthColor(i / (SEGMENTS - 1))
 
 /** A thin bar of rounded segments; percentages keep it at the card's width without stretching the corners. */
-function barSvg(percent: number, palette: Palette): string {
+function barSvg(percent: number, palette: Palette, height = BAR_HEIGHT, spaceBelow = BAR_SPACE_BELOW): string {
   const w = (100 - SEGMENT_GAP * (SEGMENTS - 1)) / SEGMENTS
   const parts = Array.from({ length: SEGMENTS }, (_, i) => {
     const x = i * (w + SEGMENT_GAP)
     const fill = segmentFill(percent, i)
-    const shape = `x="${x.toFixed(2)}%" y="0" width="${w.toFixed(2)}%" height="${BAR_HEIGHT}" rx="${BAR_HEIGHT / 2}"`
+    const shape = `x="${x.toFixed(2)}%" y="0" width="${w.toFixed(2)}%" height="${height}" rx="${height / 2}"`
     // The colored part is clipped to the segment's rounded shape, so a partial step keeps its corners.
     return `<clipPath id="s${i}"><rect ${shape}/></clipPath><rect ${shape} fill="${TRACK}"/>` +
       (fill > 0
-        ? `<rect clip-path="url(#s${i})" x="${x.toFixed(2)}%" y="0" width="${(w * fill).toFixed(2)}%" height="${BAR_HEIGHT}" fill="${colorAt(palette, i)}"/>`
+        ? `<rect clip-path="url(#s${i})" x="${x.toFixed(2)}%" y="0" width="${(w * fill).toFixed(2)}%" height="${height}" fill="${colorAt(palette, i)}"/>`
         : '')
   })
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${BAR_HEIGHT + BAR_SPACE_BELOW}">${parts.join('')}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${height + spaceBelow}">${parts.join('')}</svg>`
 }
 
-const CHEVRON = 14
-
-/** The dialog's chevron: right when the summary is closed, down when open. */
-const chevronSvg = (isOpen: boolean): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${CHEVRON}" height="${CHEVRON}" viewBox="0 0 14 14">` +
-  `<path d="${isOpen ? 'M3 5l4 4 4-4' : 'M5 3l4 4-4 4'}" fill="none" stroke="#c8c8c8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+/** The bar as the surface draws it: an Svg where it has one, colored cells on the terminal. */
+function bar(ui: Ui, percent: number, palette: Palette, alt: string, height = BAR_HEIGHT, spaceBelow = BAR_SPACE_BELOW) {
+  const { Box } = ui
+  if ('Svg' in ui) return <ui.Svg source={barSvg(percent, palette, height, spaceBelow)} alt={alt} height={height + spaceBelow} />
+  const filled = filledSegments(percent)
+  return (
+    <Box gap={1}>
+      {Array.from({ length: SEGMENTS }, (_, i) => (
+        <Box key={String(i)} width={0} flexGrow={1} height={1}
+          backgroundColor={i < filled ? colorAt(palette, i) : TRACK} />
+      ))}
+    </Box>
+  )
+}
 
 // Cards share the row in equal parts so all four always fit on one line.
-function card(ui: Ui, hasSvg: boolean, title: string, percent: number, value: string, note: string, palette: Palette = 'usage', action?: unknown) {
+function card(ui: Ui, title: string, percent: number, value: string, note: string, palette: Palette = 'usage', action?: RenderNode) {
   const { Box, Text } = ui
   const filled = filledSegments(percent)
   const tone = colorAt(palette, Math.max(0, filled - 1))
@@ -296,28 +321,54 @@ function card(ui: Ui, hasSvg: boolean, title: string, percent: number, value: st
         <Text bold>{title}</Text>
         <Text color={tone}>{value}</Text>
       </Box>
-      {!hasSvg
-        ? (
-          <Box gap={1}>
-            {Array.from({ length: SEGMENTS }, (_, i) => (
-              <Box key={String(i)} width={0} flexGrow={1} height={1}
-                backgroundColor={i < filled ? colorAt(palette, i) : TRACK} />
-            ))}
-          </Box>
-        )
-        : 'Svg' in ui && <ui.Svg source={barSvg(percent, palette)} alt={`${title} ${value}`} height={BAR_HEIGHT + BAR_SPACE_BELOW} />}
+      {bar(ui, percent, palette, `${title} ${value}`)}
       <Box justifyContent="space-between" columnGap={1}>
         <Text dimColor wrap="truncate">{note || ' '}</Text>
-        {action as never}
+        {action}
       </Box>
     </Box>
   )
 }
 
+// A view preference, kept across sessions: a band minimized stays so in the next one.
+async function setMinimized($: EngineInterface, isMinimized: boolean) {
+  await update($, minimized, () => isMinimized)
+  await $.store.set(MINIMIZED_KEY, isMinimized).catch(() => undefined)
+}
+
+async function openSettings($: EngineInterface) {
+  await $.ui.open({ id: SETTINGS_PANE, title: STRINGS.settingsTitle, focus: true, closeOnEscape: true })
+}
+
+// Each change is saved as the plugin's own option, which reloads the module with it: one source for the
+// band, the pane and settings.json. Run once the press returns, since the reload ends this environment.
+function setOption($: EngineInterface, field: keyof Thresholds | 'cacheTtl', value: number | string) {
+  $.clock.after(0, async () => {
+    const done = await $.config.set({ key: `limits.${field}`, value }).catch(() => null)
+    if (done === null || 'deny' in done) $.ui.toast(STRINGS.settingFailed(field))
+  })
+}
+
+function resetOptions($: EngineInterface) {
+  $.clock.after(0, async () => {
+    const all = { ...DEFAULTS, cacheTtl: '1h' }
+    for (const [field, value] of Object.entries(all)) {
+      const done = await $.config.set({ key: `limits.${field}`, value }).catch(() => null)
+      if (done === null || 'deny' in done) $.ui.toast(STRINGS.settingFailed(field))
+    }
+  })
+}
+
 export const register: Register = (on, options) => {
   cacheTtlMs = options.cacheTtl === '5m' ? 5 * 60_000 : 60 * 60_000
+  const parsed = readThresholds(options)
+  th = { warnTokens: parsed.warnTokens, limitTokens: parsed.limitTokens, compactAt: parsed.compactAt }
+  invalidOptions = parsed.invalid
 
   on('session.start', async ($, e, next) => {
+    if (invalidOptions.length > 0) {
+      $.ui.log(`limits: ${invalidOptions.join(', ')} out of range, using the defaults`, { to: 'debug' })
+    }
     // A reload drops the timers of a compaction under way: what is left marked running would never end.
     if ((await read($, compaction)) === 'running') await update($, compaction, () => 'idle')
     const at = await read($, resumeAt)
@@ -327,10 +378,16 @@ export const register: Register = (on, options) => {
     const usage = await $.session.usage()
     await update($, meters, () => ({ context: usage.context.percent ?? null, rateLimits: usage.rateLimits }))
     await update($, now, () => usage.startedAt)
-    const isOn = (await $.store.get(KEEPWARM_KEY)) === true
-    await update($, keepwarm, () => ({ isOn, nextPingAt: null, stopped: null }))
+    const isMinimized = (await $.store.get(MINIMIZED_KEY).catch(() => undefined)) === true
+    await update($, minimized, () => isMinimized)
+    // keepwarm belongs to the session: off in a new one, kept across a reload, whose timers are gone, so the
+    // next ping is scheduled again while the cache it would keep is still warm.
+    await update($, keepwarm, s => ({ ...s, nextPingAt: null, stopped: null }))
+    const last = await read($, lastResponse)
+    if (last && !last.isCompacted && cacheLeft(last.at, cacheTtlMs, await $.clock.now()) > 0) await schedulePing($, last.at)
     await $.command.register({ name: 'keepwarm', description: STRINGS.keepwarmDescription, argumentHint: STRINGS.keepwarmHint })
     await $.command.register({ name: 'handoff', description: STRINGS.handoffDescription, argumentHint: STRINGS.handoffHint })
+    await $.command.register({ name: 'limits', description: STRINGS.settingsDescription })
     // Redraws the cache countdown in the band between turns.
     $.clock.every(30_000, async () => {
       const t = await $.clock.now()
@@ -348,11 +405,12 @@ export const register: Register = (on, options) => {
     await update($, meters, () => ({ context: e.context.percent ?? null, rateLimits: e.rateLimits }))
 
     const percent = e.context.percent ?? 0
-    if (percent >= WARN_AT && !hasWarned) {
-      hasWarned = true
-      $.ui.toast(STRINGS.contextWarn(percent, COMPACT_AT))
+    const isWarned = (await read($, warned)).context
+    if (percent >= warnAt() && !isWarned) {
+      await update($, warned, w => ({ ...w, context: true }))
+      $.ui.toast(STRINGS.contextWarn(percent, th.compactAt))
     }
-    if (percent < WARN_AT) hasWarned = false
+    if (percent < warnAt() && isWarned) await update($, warned, w => ({ ...w, context: false }))
 
     const tokens = e.context.tokens ?? 0
     await update($, contextTokens, () => tokens)
@@ -397,7 +455,7 @@ export const register: Register = (on, options) => {
 
     const percent = usage.context.percent ?? 0
     const state = await read($, compaction)
-    if (state === 'queued' || (state === 'idle' && e.reason === 'answer' && percent >= COMPACT_AT)) await compact($, percent)
+    if (state === 'queued' || (state === 'idle' && e.reason === 'answer' && percent >= th.compactAt)) await compact($, percent)
 
     return result
   })
@@ -407,6 +465,66 @@ export const register: Register = (on, options) => {
     const isOn = arg === 'on' ? true : arg === 'off' ? false : !(await read($, keepwarm)).isOn
     await setKeepwarm($, isOn)
     return { text: isOn ? STRINGS.keepwarmOn : STRINGS.keepwarmOff }
+  })
+
+  on('command.run', { command: 'limits' }, async $ => {
+    await openSettings($)
+    return { text: STRINGS.settingsOpened }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: SETTINGS_PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const warmth = await read($, keepwarm)
+    const ttl = cacheTtlMs === 5 * 60_000 ? '5m' : '1h'
+    const LABEL = 20
+
+    const stepper = (field: keyof Thresholds, title: string, value: string, note: string) => (
+      <Box key={field} columnGap={1} alignItems="center">
+        <Box width={LABEL}><Text>{title}</Text></Box>
+        <Button key={`${field}-down`} label="−" onPress={() => setOption($, field, stepThreshold(th, field, -1))} />
+        <Box width={7} justifyContent="center"><Text bold>{value}</Text></Box>
+        <Button key={`${field}-up`} label="+" onPress={() => setOption($, field, stepThreshold(th, field, 1))} />
+        <Text dimColor wrap="truncate">{note}</Text>
+      </Box>
+    )
+    const choice = (key: string, title: string, options: readonly string[], value: string, onPick: (v: string) => void) => (
+      <Box key={key} columnGap={1} alignItems="center">
+        <Box width={LABEL}><Text>{title}</Text></Box>
+        {options.map(o => (
+          <Button key={`${key}-${o}`} label={o === value ? `● ${o}` : o} dimColor={o !== value} onPress={() => onPick(o)} />
+        ))}
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
+        {stepper('warnTokens', STRINGS.settingWarn, thousands(th.warnTokens), STRINGS.settingWarnNote)}
+        {stepper('limitTokens', STRINGS.settingLimit, thousands(th.limitTokens), STRINGS.settingLimitNote)}
+        {stepper('compactAt', STRINGS.settingCompact, `${th.compactAt}%`, STRINGS.settingCompactNote)}
+        {choice('cacheTtl', STRINGS.settingTtl, ['5m', '1h'], ttl, v => setOption($, 'cacheTtl', v))}
+        {choice('keepwarm', STRINGS.settingKeepwarm, ['off', 'on'], warmth.isOn ? 'on' : 'off', v => void setKeepwarm($, v === 'on'))}
+        <Box columnGap={2}>
+          <Button key="settings-reset" label={STRINGS.settingsReset} dimColor onPress={() => resetOptions($)} />
+          <Button key="settings-close" label={STRINGS.settingsClose} onPress={() => void $.ui.close({ id: SETTINGS_PANE })} />
+        </Box>
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: HANDOFF_PANE }, async ($, e) => {
+    const { Box, Button, Markdown, Text } = $.ui.resolve(e)
+    const ho = await read($, handoff)
+    if (ho.phase !== 'review' || ho.text === null) return <Text dimColor>{STRINGS.noSummary}</Text>
+    return (
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
+        <Box columnGap={2} alignItems="center">
+          <Button key="handoff-start" label={STRINGS.handoffStart} onPress={() => startHandoff($)} />
+          <Button key="handoff-copy" label={STRINGS.copy} onPress={() => copyHandoff($, ho.text ?? '', e.surface)} />
+          <Button key="handoff-cancel" label={STRINGS.cancel} dimColor onPress={() => void cancelHandoff($)} />
+        </Box>
+        <Markdown text={ho.text} />
+      </Box>
+    )
   })
 
   on('command.run', { command: 'handoff' }, async ($, e) => {
@@ -450,15 +568,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // While a summary is under review, scrolling the band moves through the summary instead of the band.
-  on('ui.scroll', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const ho = await read($, handoff)
-    if (ho.phase !== 'review' || ho.text === null || !ho.isExpanded) return next(e)
-    if (reviewWindow(ho.text, 0, REVIEW_ROWS).max === 0) return next(e)
-    await scrollReview($, e.by)
-    return {}
-  })
-
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
@@ -467,8 +576,6 @@ export const register: Register = (on, options) => {
     const { context, rateLimits } = await read($, meters)
     const t = Math.max(await read($, now), last?.at ?? 0)
     const ui = $.ui.resolve(e)
-    // The terminal has no Svg: there the bar falls back to colored cells.
-    const hasSvg = 'Svg' in ui
     const { Box, Button, Text } = ui
 
     const warmth = await read($, keepwarm)
@@ -478,77 +585,77 @@ export const register: Register = (on, options) => {
     )
     const kwNote = keepwarmNote(warmth, t)
     const left = last ? cacheLeft(last.at, cacheTtlMs, t) : 0
+    const cachePercent = last === null || last.isCompacted ? 0 : (left / cacheTtlMs) * 100
+
+    if (await read($, minimized)) {
+      // One row: the four bars alone, thinner, and the control that brings the band back.
+      const bars: [string, number, Palette][] = [
+        ...(context === null ? [] : [[STRINGS.context, context, 'usage'] as [string, number, Palette]]),
+        ...rateLimits.map((l): [string, number, Palette] => [label(l.kind), l.percentUsed, 'usage']),
+        ['cache', cachePercent, 'cache'],
+      ]
+      return (
+        <Box flexDirection="row" columnGap={3} paddingX={1} alignItems="center">
+          {bars.map(([title, percent, palette]) => (
+            <Box key={title} width={0} flexGrow={1} minWidth={0}>
+              {bar(ui, percent, palette, `${title} ${Math.round(percent)}%`, MINI_BAR_HEIGHT, 0)}
+            </Box>
+          ))}
+          <Button key="view-toggle" label="+" dimColor onPress={() => setMinimized($, false)} />
+        </Box>
+      )
+    }
     // Full and red right after a response, draining to blue as the TTL runs out.
     const cacheCard = last === null
-      ? card(ui, hasSvg, 'cache', 0, '–', kwNote || STRINGS.noResponse, 'cache', toggle)
+      ? card(ui, 'cache', 0, '–', kwNote || STRINGS.noResponse, 'cache', toggle)
+      : last.isCompacted
+        ? card(ui, 'cache', 0, 'cold', STRINGS.cacheCompacted, 'cache', toggle)
       : left > 0
-        ? card(ui, hasSvg, 'cache', (left / cacheTtlMs) * 100, duration(left),
+        ? card(ui, 'cache', (left / cacheTtlMs) * 100, duration(left),
             kwNote || (last.cacheRead > last.cacheWrite ? 'hit' : 'miss'), 'cache', toggle)
-        : card(ui, hasSvg, 'cache', 0, 'cold', kwNote || STRINGS.rewrites(thousands(tokens)), 'cache', toggle)
+        : card(ui, 'cache', 0, 'cold', kwNote || STRINGS.rewrites(thousands(tokens)), 'cache', toggle)
 
     const ho = await read($, handoff)
-    const view = reviewWindow(ho.text ?? '', ho.scroll, REVIEW_ROWS)
+    const isNear = tokens >= th.warnTokens
+    // The band keeps one line for the summary under review: the text itself is read in its pane.
     const handoffPanel = ho.phase === 'writing'
       ? <Text dimColor>{STRINGS.handoffWriting}</Text>
       : ho.phase === 'starting'
         ? <Text dimColor>{STRINGS.handoffStarting}</Text>
         : ho.phase === 'review' && ho.text !== null
           ? (
-            <Box flexDirection="column" marginTop={1}>
-              <Box columnGap={2} alignItems="center">
-                {/* A Button holds only text, so the chevron is a drawing beside it and the title is what toggles; the keyed Box underlines the title while the pointer is anywhere on the pair. */}
-                <Box key="handoff-title" columnGap={1} alignItems="center">
-                  {'Svg' in ui
-                    ? <ui.Svg source={chevronSvg(ho.isExpanded)} alt={ho.isExpanded ? '⌄' : '›'} width={CHEVRON} height={CHEVRON} />
-                    : <Text dimColor>{ho.isExpanded ? 'v' : '>'}</Text>}
-                  <Button key="handoff-toggle" plain hover={{ underline: true }}
-                    onPress={() => update($, handoff, (s): Handoff => ({ ...s, isExpanded: !s.isExpanded }))}>
-                    <Text bold>{STRINGS.handoffReady(grouped(ho.text.length))}</Text>
-                  </Button>
-                </Box>
-                <Button key="handoff-start" label={STRINGS.handoffStart} onPress={() => startHandoff($)} />
-                <Button key="handoff-copy" label={STRINGS.copy} onPress={() => copyHandoff($, ho.text ?? '', e.surface)} />
-                <Button key="handoff-cancel" label={STRINGS.cancel} dimColor
-                  onPress={() => update($, handoff, (): Handoff => IDLE_HANDOFF)} />
-              </Box>
-              {ho.isExpanded && (
-                <Box flexDirection="column" marginTop={1}>
-                  <Box flexDirection="column" height={REVIEW_ROWS} overflow="hidden">
-                    {'Markdown' in ui ? <ui.Markdown text={view.text} /> : <Text>{view.text}</Text>}
-                  </Box>
-                  {view.max > 0 && (
-                    // The wheel may scroll the whole band where the surface handles it natively: the arrows always move the summary.
-                    <Box columnGap={1} alignItems="center">
-                      <Button key="handoff-up" label="▲" dimColor={view.from === 0} onPress={() => scrollReview($, -REVIEW_ROWS + 1)} />
-                      <Button key="handoff-down" label="▼" dimColor={view.from === view.max} onPress={() => scrollReview($, REVIEW_ROWS - 1)} />
-                      <Text dimColor>{STRINGS.reviewRows(view.from + 1, view.to, view.total)}</Text>
-                    </Box>
-                  )}
-                </Box>
-              )}
+            <Box marginTop={1} columnGap={2} alignItems="center">
+              <Text bold>{STRINGS.handoffReady(grouped(ho.text.length))}</Text>
+              <Button key="handoff-open" label={STRINGS.handoffOpen} onPress={() => void openSummary($)} />
+              <Button key="handoff-start" label={STRINGS.handoffStart} onPress={() => startHandoff($)} />
+              <Button key="handoff-copy" label={STRINGS.copy} onPress={() => copyHandoff($, ho.text ?? '', e.surface)} />
+              <Button key="handoff-cancel" label={STRINGS.cancel} dimColor onPress={() => void cancelHandoff($)} />
             </Box>
           )
           : null
 
     const compactState = await read($, compaction)
-    const isOver = tokens >= TOKENS_LIMIT
-    const isNear = tokens >= TOKENS_WARN
+    const isOver = tokens >= th.limitTokens
 
     return (
       <Box flexDirection="column" paddingX={1}>
         <Box flexDirection="row" columnGap={3}>
-          {context !== null && card(ui, hasSvg, STRINGS.context, context, `${Math.round(context)}%`, `${thousands(tokens)} tokens`)}
+          {context !== null && card(ui, STRINGS.context, context, `${Math.round(context)}%`, `${thousands(tokens)} tokens`)}
           {rateLimits.map(limit =>
-            card(ui, hasSvg, label(limit.kind), limit.percentUsed, `${Math.round(limit.percentUsed)}%`,
+            card(ui, label(limit.kind), limit.percentUsed, `${Math.round(limit.percentUsed)}%`,
               limit.resetsAt === undefined ? '' : `↺ ${duration(Date.parse(limit.resetsAt) - t)}`))}
           {cacheCard}
+          <Box flexDirection="column" justifyContent="space-between">
+            <Button key="view-toggle" label="−" dimColor onPress={() => setMinimized($, true)} />
+            <Button key="settings" label="⚙" dimColor onPress={() => void openSettings($)} />
+          </Box>
         </Box>
         {isNear && (
           <Box marginTop={1} columnGap={2} alignItems="center">
             <Text color={isOver ? 'red' : 'yellow'}>
               {isOver
-                ? STRINGS.overLimit(thousands(tokens), thousands(TOKENS_LIMIT))
-                : STRINGS.nearLimit(thousands(tokens), thousands(TOKENS_LIMIT))}
+                ? STRINGS.overLimit(thousands(tokens), thousands(th.limitTokens))
+                : STRINGS.nearLimit(thousands(tokens), thousands(th.limitTokens))}
             </Text>
             {compactState === 'running'
               ? <Text dimColor>{STRINGS.compacting}</Text>
