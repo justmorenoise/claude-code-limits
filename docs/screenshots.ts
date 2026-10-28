@@ -59,7 +59,8 @@ function band(s: State): string {
     return `<div class="band slim"><div class="cards center">${mini(s.context)}${mini(s.fiveHour)}${mini(s.weekly)}${mini(cachePercent, 'cache')}` +
       `${button('+', true)}</div></div>`
   }
-  const toggle = button(s.keepwarm ? 'keepwarm ●' : 'keepwarm ○', !s.keepwarm)
+  // keepwarm is a link that toggles it, the dot its state: green on, red off.
+  const toggle = `<span class="kw"><span class="kwlink">keepwarm</span> <span style="color:${segmentColor(s.keepwarm ? 0 : SEGMENTS - 1)}">●</span></span>`
   const cache = s.cache === 'cold'
     ? card('cache', 0, 'cold', STRINGS.rewrites(`${Math.round(s.tokens / 1000)}k`), 'cache', toggle)
     : card('cache', (s.cache.left / (60 * MIN)) * 100, duration(s.cache.left), s.cache.note, 'cache', toggle)
@@ -141,7 +142,9 @@ body{background:#141414;padding:8px;font:13px/1.45 -apple-system,BlinkMacSystemF
 .band.slim{padding:6px 8px 6px 16px}
 .cards.center{align-items:center}
 .mini{flex:1 1 0;min-width:0;display:flex}
-.side{display:flex;flex-direction:column;justify-content:space-between;align-items:center}
+.side{display:flex;flex-direction:column;justify-content:space-between;align-items:center;gap:8px}
+.kw{white-space:nowrap}
+.kwlink{color:#6ea8fe;text-decoration:underline;text-underline-offset:2px}
 .card{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}
 .row{display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:22px}
 .row b{font-size:14px}

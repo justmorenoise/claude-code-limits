@@ -5,7 +5,7 @@ A Claude Code mod that puts your usage above the prompt, and helps you act on it
 ![The band](docs/band.png)
 
 - **Four cards**: context, 5-hour limit, 7-day limit and prompt cache. Each has a thin bar of ten steps that fill in part and run from green to red; the cache card runs from red (just written) to blue (about to expire).
-- **keepwarm**: a toggle on the cache card, or `/keepwarm [on|off]`. While on, a minimal request re-reads the cache shortly before it expires, for up to 6 hours after your last message. It applies to the session you turn it on in, and every new session starts with it off. Each ping costs tokens and counts toward your limits; a compaction rewrites the cache, so it stops pinging until your next turn.
+- **keepwarm**: click **keepwarm** on the cache card (the dot is green when on, red when off), switch it in the settings pane, or run `/keepwarm [on|off]`. While on, a minimal request re-reads the cache shortly before it expires, for up to 6 hours after your last message. It applies to the session you turn it on in, and every new session starts with it off. Each ping costs tokens and counts toward your limits; a compaction rewrites the cache, so it stops pinging until your next turn.
 - **Handoff**: `/handoff [what to keep]`, or the Handoff button that appears past 250k tokens (with **+** to say what matters most). The model writes a summary of goal, plan, decisions, files touched and commit/deploy state; it opens in a pane of its own, in Markdown, to review; then the mod runs `/clear` and sends the summary as the first message of a clean conversation. Nothing is written to your project. The old conversation stays available through `/resume`.
 - **Context guard**: a warning at 250k tokens with a **Compact now** button, a red warning at 300k (a warning only: it does not compact), and automatic compaction at the end of a turn above 85% of the window. All three are settings.
 - **Minimized view**: **−** above the ⚙ shrinks the band to one row with the four bars alone, thinner and without text; **+** brings the cards back. The choice is kept for the next sessions.
@@ -17,7 +17,7 @@ Reset times read as in Claude's own usage panel: `2 hr 23 min`, `4 d 16 hr`.
 
 The images in this README are rendered from the mod's own bars, colors and strings with `docs/screenshots.ts`, since each state takes a long session to reach; the band in Claude Code draws the same elements in its own fonts.
 
-**keepwarm on**: the cache card counts down to the next ping.
+**keepwarm on**: the dot turns green and the cache card counts down to the next ping.
 
 ![keepwarm on](docs/keepwarm.png)
 
