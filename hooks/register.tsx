@@ -333,6 +333,8 @@ const SEGMENT_GAP = 1.2
 // The minimized band: bars alone, on one row.
 const MINI_BAR_HEIGHT = 3
 const MINIMIZED_KEY = 'minimized'
+// Never opened: the press is answered by the mod.
+const KEEPWARM_HREF = 'https://keepwarm.limits/toggle'
 
 type Palette = 'usage' | 'cache'
 
@@ -382,7 +384,7 @@ function card(ui: Ui, title: string, percent: number, value: string, note: strin
         <Text color={tone}>{value}</Text>
       </Box>
       {bar(ui, percent, palette, `${title} ${value}`)}
-      <Box justifyContent="space-between" columnGap={1}>
+      <Box justifyContent="space-between" alignItems="center" columnGap={1}>
         <Text dimColor wrap="truncate">{note || ' '}</Text>
         {action}
       </Box>
@@ -643,12 +645,17 @@ export const register: Register = (on, options) => {
     const t = Math.max(await read($, now), last?.at ?? 0)
     const rateLimits = measured.rateLimits.map(l => liveLimit(l, t))
     const ui = $.ui.resolve(e)
-    const { Box, Button, Text } = ui
+    const { Box, Button, Markdown, Text } = ui
 
     const warmth = await read($, keepwarm)
-    const toggle = (
-      <Button key="keepwarm" label={warmth.isOn ? 'keepwarm ●' : 'keepwarm ○'} dimColor={!warmth.isOn}
-        onPress={() => setKeepwarm($, !warmth.isOn)} />
+    // A Button is drawn as a native button on the desktop, whatever its props: a Markdown link whose press
+    // the mod answers is the only clickable text. The link takes the surface's link color, so the dot carries on/off.
+    const kwIndicator = (
+      <Box key="keepwarm" flexShrink={0} alignItems="center">
+        <Markdown key="keepwarm-link" text={`[keepwarm](${KEEPWARM_HREF})`}
+          pressableLinks={[KEEPWARM_HREF]} onLinkPress={() => void setKeepwarm($, !warmth.isOn)} />
+        <Text color={warmth.isOn ? segmentColor(0) : segmentColor(SEGMENTS - 1)}> ●</Text>
+      </Box>
     )
     const kwNote = keepwarmNote(warmth, t)
     const left = last ? cacheLeft(last.at, cacheTtlMs, t) : 0
@@ -674,13 +681,13 @@ export const register: Register = (on, options) => {
     }
     // Full and red right after a response, draining to blue as the TTL runs out.
     const cacheCard = last === null
-      ? card(ui, 'cache', 0, '–', kwNote || STRINGS.noResponse, 'cache', toggle)
+      ? card(ui, 'cache', 0, '–', kwNote || STRINGS.noResponse, 'cache', kwIndicator)
       : last.isCompacted
-        ? card(ui, 'cache', 0, 'cold', STRINGS.cacheCompacted, 'cache', toggle)
+        ? card(ui, 'cache', 0, 'cold', STRINGS.cacheCompacted, 'cache', kwIndicator)
       : left > 0
         ? card(ui, 'cache', (left / cacheTtlMs) * 100, duration(left),
-            kwNote || (last.cacheRead > last.cacheWrite ? 'hit' : 'miss'), 'cache', toggle)
-        : card(ui, 'cache', 0, 'cold', kwNote || STRINGS.rewrites(thousands(tokens)), 'cache', toggle)
+            kwNote || (last.cacheRead > last.cacheWrite ? 'hit' : 'miss'), 'cache', kwIndicator)
+        : card(ui, 'cache', 0, 'cold', kwNote || STRINGS.rewrites(thousands(tokens)), 'cache', kwIndicator)
 
     const ho = await read($, handoff)
     const isNear = tokens >= th.warnTokens
@@ -715,7 +722,7 @@ export const register: Register = (on, options) => {
               limit.isReset ? `↺ ${STRINGS.windowReset}`
                 : limit.resetsAt === undefined ? '' : `↺ ${duration(Date.parse(limit.resetsAt) - t)}`))}
           {cacheCard}
-          <Box flexDirection="column" justifyContent="space-between">
+          <Box flexDirection="column" justifyContent="space-between" rowGap={1} flexShrink={0}>
             <Button key="view-toggle" label="−" dimColor onPress={() => setMinimized($, true)} />
             <Button key="settings" label="⚙" dimColor onPress={() => void openSettings($)} />
           </Box>

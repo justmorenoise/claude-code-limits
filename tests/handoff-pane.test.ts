@@ -48,7 +48,7 @@ test('the summary opens in its own pane, in Markdown, and the band keeps one lin
 
   const band = await $.ui.mount({ plugin: 'limits', surface: 'desktop', component: 'AbovePrompt', props: BAND })
   expect(await band.find({ text: STRINGS.handoffReady(String(SUMMARY.length)) })).toBeDefined()
-  expect(await band.find({ type: 'Markdown' })).toBeUndefined()
+  expect(await band.find({ type: 'Markdown', text: SUMMARY })).toBeUndefined()
   expect(await band.find({ text: 'Move sign-in to OAuth.' })).toBeUndefined()
 })
 
