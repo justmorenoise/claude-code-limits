@@ -113,17 +113,17 @@ const STATES: Record<string, { state: State; height: number }> = {
       cache: { left: 41 * MIN, note: STRINGS.pingIn(duration(32 * MIN)) }, keepwarm: true },
   },
   'near-limit': {
-    height: 136,
+    height: 150,
     state: { context: 27, tokens: 268_000, fiveHour: 74, fiveReset: 52 * MIN, weekly: 33, weeklyReset: (4 * 24 + 2) * 60 * MIN,
       cache: { left: 55 * MIN, note: 'hit' }, keepwarm: false, extra: nearLimit('268k') },
   },
   handoff: {
-    height: 164,
+    height: 178,
     state: { context: 28, tokens: 281_000, fiveHour: 77, fiveReset: 44 * MIN, weekly: 34, weeklyReset: (4 * 24 + 1) * 60 * MIN,
       cache: { left: 58 * MIN, note: 'hit' }, keepwarm: false, extra: nearLimit('281k') + review },
   },
   minimized: {
-    height: 52,
+    height: 64,
     state: { context: 31, tokens: 62_000, fiveHour: 53, fiveReset: 93 * MIN, weekly: 16, weeklyReset: (4 * 24 + 14) * 60 * MIN,
       cache: { left: 52 * MIN, note: 'hit' }, keepwarm: false, isMinimized: true },
   },
@@ -139,17 +139,19 @@ const CSS = `
 body{background:#141414;padding:8px;font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color:#e8e8e8;-webkit-font-smoothing:antialiased}
 .band{background:#232323;border-radius:12px;padding:12px 8px 12px 16px}
 .cards{display:flex;gap:24px}
-.band.slim{padding:6px 8px 6px 16px}
+.band.slim{padding:8px 8px 8px 16px}
 .cards.center{align-items:center}
 .mini{flex:1 1 0;min-width:0;display:flex}
-.side{display:flex;flex-direction:column;justify-content:space-between;align-items:center;gap:8px}
+.side{display:flex;flex-direction:column;justify-content:space-between;align-items:center;gap:4px}
+.side .btn,.slim .btn{width:28px;height:28px;padding:0;display:flex;align-items:center;justify-content:center;font-size:16px}
 .kw{white-space:nowrap}
-.kwlink{color:#6ea8fe;text-decoration:underline;text-underline-offset:2px}
+.kwlink{color:#5ea6ee}
 .card{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}
 .row{display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:22px}
 .row b{font-size:14px}
 .note{color:#8f8f8f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.btn{background:#353535;border-radius:6px;padding:1px 8px;color:#e0e0e0;white-space:nowrap}
+/* Sized as the desktop app's native buttons. */
+.btn{background:#3a3a3a;border-radius:8px;padding:4px 10px;color:#e0e0e0;white-space:nowrap}
 .btn.dim{color:#9a9a9a}
 .line{display:flex;align-items:center;gap:16px;margin-top:12px}
 .line.left{gap:8px;margin-top:8px}
@@ -179,7 +181,7 @@ for (const [name, { state, height }] of Object.entries(STATES)) {
   console.log(`docs/${name}.png`)
 }
 
-const PANES: [string, string, number, number][] = [['handoff-pane', PANE, 560, 372], ['settings', SETTINGS, 640, 262]]
+const PANES: [string, string, number, number][] = [['handoff-pane', PANE, 560, 376], ['settings', SETTINGS, 640, 298]]
 for (const [name, body, width, height] of PANES) {
   const html = join(tmp, `${name}.html`)
   writeFileSync(html, `<!doctype html><meta charset="utf-8"><style>${CSS}</style><body>${body}</body>`)
