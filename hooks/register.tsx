@@ -53,7 +53,7 @@ function cancelPing() {
 const onCompact: Hook<'session.compact'> = async ($, e, next) => {
   const result = await next(e)
   if (e.agentId !== undefined) return result
-  if (!('skip' in result)) await markCompacted($)
+  if (!('skip' in result)) await markCompacted($, result.tokensAfter)
   // The /compact turn the mod sent has run: the band's compaction is over, whatever it came to.
   if (promptedTimer !== undefined) {
     promptedTimer.cancel()
@@ -64,24 +64,72 @@ const onCompact: Hook<'session.compact'> = async ($, e, next) => {
 }
 
 /** The cached prefix is no longer what the next request sends: no ping for it, and the card reads it as cold. */
-async function markCompacted($: EngineInterface) {
+async function markCompacted($: EngineInterface, tokensAfter?: number) {
+  // The figures first: the band must not show the old size while the rest settles.
+  await estimateContext($, tokensAfter)
   cancelPing()
   await update($, lastResponse, r => (r === null ? r : { ...r, isCompacted: true }))
   await update($, keepwarm, s => ({ ...s, nextPingAt: null }))
-  await estimateContext($)
+  await refresh($)
 }
 
 /**
  * Right after a compaction no response has measured the new window, so the engine has no fill to report:
- * a local count stands in until the next response, rather than the figures from before it.
+ * the compaction's own size stands in until the next response, else a local count, rather than the
+ * figures from before it.
  */
-async function estimateContext($: EngineInterface) {
-  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
-  const total = usage?.context.breakdown?.totalTokens
+async function estimateContext($: EngineInterface, tokensAfter?: number) {
+  const usage = await $.session.usage(tokensAfter === undefined ? { breakdown: 'summary' } : {}).catch(() => undefined)
+  const total = tokensAfter ?? usage?.context.breakdown?.totalTokens
   const window = usage?.context.window ?? 0
   const isKnown = total !== undefined && window > 0
-  await update($, meters, m => ({ ...m, context: isKnown ? (total / window) * 100 : null, isEstimate: isKnown, isPending: !isKnown }))
-  await update($, contextTokens, () => (isKnown ? total : 0))
+  await setContext($, isKnown ? (total / window) * 100 : null, isKnown ? total : 0, { isEstimate: isKnown, isPending: !isKnown })
+  await warnTokens($, isKnown ? total : 0)
+}
+
+/** The fill and its token count move together, so the card never pairs a new percent with an old count. */
+async function setContext($: EngineInterface, percent: number | null, tokens: number, flags: { isEstimate?: boolean; isPending?: boolean } = {}) {
+  await update($, meters, m => ({ ...m, context: percent, isEstimate: flags.isEstimate, isPending: flags.isPending }))
+  await update($, contextTokens, () => tokens)
+}
+
+// The band's countdowns (cache, resets, next ping) read `now`: it moves when the minute they show would
+// change, not on a fixed beat, so each one turns over on time.
+let tickTimer: Timer | undefined
+const MINUTE = 60_000
+
+/** Milliseconds until `duration(target - t)` reads differently, or the target passes. */
+function untilChange(target: number, t: number): number | undefined {
+  const r = target - t
+  if (r <= 0) return undefined
+  // duration rounds to the minute: the reading drops each time r falls below k min + 30 s.
+  if (r <= MINUTE / 2) return r
+  const k = Math.ceil((r - MINUTE / 2) / MINUTE) - 1
+  return r - (k * MINUTE + MINUTE / 2) + 1
+}
+
+async function refresh($: EngineInterface) {
+  const t = await $.clock.now()
+  await update($, now, () => t)
+  tickTimer?.cancel()
+  tickTimer = undefined
+  const last = await read($, lastResponse)
+  const { rateLimits } = await read($, meters)
+  const { nextPingAt } = await read($, keepwarm)
+  const targets = [
+    last && !last.isCompacted ? last.at + cacheTtlMs : undefined,
+    nextPingAt ?? undefined,
+    ...rateLimits.map(l => (l.resetsAt === undefined ? undefined : Date.parse(l.resetsAt))),
+  ]
+  const waits = targets.flatMap(at => {
+    const w = at === undefined || Number.isNaN(at) ? undefined : untilChange(at, t)
+    return w === undefined ? [] : [w]
+  })
+  if (waits.length === 0) return
+  tickTimer = $.clock.after(Math.min(...waits), () => {
+    tickTimer = undefined
+    void refresh($)
+  })
 }
 
 /** A turn of yours restarts the 6h window in which pings may run. */
@@ -110,6 +158,7 @@ async function schedulePing($: EngineInterface, from: number) {
     return
   }
   await update($, keepwarm, s => ({ ...s, nextPingAt: at, stopped: null }))
+  await refresh($)
   pingTimer = $.clock.after(Math.max(1000, at - (await $.clock.now())), () => {
     pingTimer = undefined
     void ping($)
@@ -259,7 +308,7 @@ async function compact($: EngineInterface, percent: number) {
     try {
       const done = await runCompaction($, n === COMPACT_RETRIES)
       if (done === 'prompted') return
-      if (!('skip' in done)) await markCompacted($)
+      if (!('skip' in done)) await markCompacted($, done.tokensAfter)
       await update($, compaction, () => 'idle')
       if (!('skip' in done)) $.ui.toast(STRINGS.contextCompacted(percent))
     } catch (err) {
@@ -291,7 +340,7 @@ async function compactNow($: EngineInterface) {
     try {
       const done = await runCompaction($)
       if (done === 'prompted') return
-      if (!('skip' in done)) await markCompacted($)
+      if (!('skip' in done)) await markCompacted($, done.tokensAfter)
       await update($, compaction, () => 'idle')
       $.ui.toast('skip' in done ? STRINGS.compactSkipped(String(done.skip ?? '')) : STRINGS.compacted)
     } catch (err) {
@@ -439,7 +488,8 @@ export const register: Register = (on, options) => {
     // Fills the bars before the first turn, so they show as soon as the session opens.
     const usage = await $.session.usage()
     await update($, meters, () => ({ context: usage.context.percent ?? null, rateLimits: usage.rateLimits }))
-    await update($, now, () => usage.startedAt)
+    const tokens = usage.context.tokens
+    if (usage.context.percent !== undefined && tokens !== undefined) await update($, contextTokens, () => tokens)
     const isMinimized = (await $.store.get(MINIMIZED_KEY).catch(() => undefined)) === true
     await update($, minimized, () => isMinimized)
     // keepwarm belongs to the session: off in a new one, kept across a reload, whose timers are gone, so the
@@ -450,11 +500,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'keepwarm', description: STRINGS.keepwarmDescription, argumentHint: STRINGS.keepwarmHint })
     await $.command.register({ name: 'handoff', description: STRINGS.handoffDescription, argumentHint: STRINGS.handoffHint })
     await $.command.register({ name: 'limits', description: STRINGS.settingsDescription })
-    // Redraws the cache countdown in the band between turns.
-    $.clock.every(30_000, async () => {
-      const t = await $.clock.now()
-      await update($, now, () => t)
-    })
+    await refresh($)
     return next(e)
   })
 
@@ -476,11 +522,13 @@ export const register: Register = (on, options) => {
     }
     if (percent < warnAt() && isWarned) await update($, warned, w => ({ ...w, context: false }))
 
-    if (e.context.tokens !== undefined) {
+    // The count goes with the fill: after a compaction `tokens` is still the last response's, from before it.
+    if (isMeasured && e.context.tokens !== undefined) {
       const tokens = e.context.tokens
       await update($, contextTokens, () => tokens)
       await warnTokens($, tokens)
     }
+    await refresh($)
 
     return next(e)
   })
@@ -499,8 +547,8 @@ export const register: Register = (on, options) => {
       }
       await update($, lastResponse, () => response)
     }
-    await update($, now, () => t)
     if (result.usage) await schedulePing($, t)
+    await refresh($)
 
     const usage = await $.session.usage()
     const until = exhaustedUntil(usage.rateLimits)
@@ -610,6 +658,12 @@ export const register: Register = (on, options) => {
       await update($, lastResponse, () => null)
       await update($, keepwarm, s => ({ ...s, nextPingAt: null, stopped: null }))
       if ((await read($, compaction)) === 'queued') await update($, compaction, () => 'idle')
+      // The new conversation has no response yet: no figures from the old one.
+      await setContext($, null, 0, { isPending: true })
+      await warnTokens($, 0)
+      await update($, warned, w => ({ ...w, context: false }))
+      tickTimer?.cancel()
+      tickTimer = undefined
       $.ui.status(undefined)
     }
     return next(e)
