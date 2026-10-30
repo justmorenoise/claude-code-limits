@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { exhaustedUntil } from '../hooks/format'
+import { accountLimits, exhaustedUntil } from '../hooks/format'
 import { STRINGS } from '../hooks/strings'
 
 const RESET = '2026-10-06T14:00:00.000Z'
@@ -135,4 +135,31 @@ test('each warning shows once until its figure drops back', async ($, on) => {
   await measure(40, 100_000)
   await measure(81, 255_000)
   expect(toasts).toHaveLength(4)
+})
+
+test('the account usage answer reads as the engine windows', async () => {
+  expect(accountLimits({ five_hour: { utilization: 11.04, resets_at: RESET }, seven_day: { utilization: 46, resets_at: null }, seven_day_opus: null })).toEqual([
+    { kind: 'five_hour', percentUsed: 11, resetsAt: RESET },
+    { kind: 'seven_day', percentUsed: 46 },
+  ])
+  expect(accountLimits(null)).toEqual([])
+})
+
+test('a cold session fills the bars from the account before any response', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { state } = fakeSession(on, [])
+  const asked: { url: string; auth?: string }[] = []
+  on('session.authorize', () => ({ value: { handle: 'h1', kind: 'bearer' } }))
+  on('http.fetch', ($, e) => {
+    asked.push({ url: e.url, auth: e.init?.auth })
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ five_hour: { utilization: 11, resets_at: RESET }, seven_day: { utilization: 46, resets_at: RESET } }) } }
+  })
+
+  await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+  await clock.advance(1000)
+  expect(asked).toEqual([{ url: 'https://api.anthropic.com/api/oauth/usage', auth: 'h1' }])
+  expect((state.get('meters') as { rateLimits: unknown[] }).rateLimits).toEqual([
+    { kind: 'five_hour', percentUsed: 11, resetsAt: RESET },
+    { kind: 'seven_day', percentUsed: 46, resetsAt: RESET },
+  ])
 })

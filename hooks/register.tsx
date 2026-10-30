@@ -4,7 +4,7 @@ import type { EngineInterface, Hook, Register, RenderNode, RenderSurface, Sessio
 import type { Compaction, Handoff, Keepwarm, LastResponse, Meters, Warned } from '../types'
 import { handoffMessage, handoffPrompt, isDismissal } from './handoff'
 import { isWarmPing, keepwarmNote, PING_PROMPT, pingDelay, WINDOW_MS } from './keepwarm'
-import { cacheLeft, exhaustedUntil, liveLimit, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
+import { accountLimits, cacheLeft, exhaustedUntil, liveLimit, filledSegments, SEGMENTS, segmentColor, segmentFill, thousands, warmthColor } from './format'
 import { DEFAULTS, readThresholds, stepThreshold } from './settings'
 import type { Thresholds } from './settings'
 import { duration, grouped, label, STRINGS } from './strings'
@@ -106,6 +106,31 @@ function untilChange(target: number, t: number): number | undefined {
   if (r <= MINUTE / 2) return r
   const k = Math.ceil((r - MINUTE / 2) / MINUTE) - 1
   return r - (k * MINUTE + MINUTE / 2) + 1
+}
+
+/**
+ * The engine reads the windows off a response's headers, so a session that has not sent one yet has none:
+ * ask the account, as the native panel does. Figures a response brought in the meantime win.
+ */
+async function fetchAccountLimits($: EngineInterface) {
+  try {
+    const auth = await $.session.authorize()
+    if (auth?.kind !== 'bearer') return
+    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: { 'anthropic-beta': 'oauth-2025-04-20' },
+      auth: auth.handle,
+    })
+    if (!res.ok) {
+      $.ui.log(`limits: account usage answered ${res.status}`, { to: 'debug' })
+      return
+    }
+    const limits = accountLimits(JSON.parse(res.text))
+    if (limits.length === 0) return
+    await update($, meters, m => (m.rateLimits.length > 0 ? m : { ...m, rateLimits: limits }))
+    await refresh($)
+  } catch (err) {
+    $.ui.log(`limits: account usage failed: ${errorText(err)}`, { to: 'debug' })
+  }
 }
 
 async function refresh($: EngineInterface) {
@@ -490,6 +515,7 @@ export const register: Register = (on, options) => {
     await update($, meters, () => ({ context: usage.context.percent ?? null, rateLimits: usage.rateLimits }))
     const tokens = usage.context.tokens
     if (usage.context.percent !== undefined && tokens !== undefined) await update($, contextTokens, () => tokens)
+    if (usage.rateLimits.length === 0) void fetchAccountLimits($)
     const isMinimized = (await $.store.get(MINIMIZED_KEY).catch(() => undefined)) === true
     await update($, minimized, () => isMinimized)
     // keepwarm belongs to the session: off in a new one, kept across a reload, whose timers are gone, so the

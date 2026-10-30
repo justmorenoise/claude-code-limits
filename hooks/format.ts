@@ -21,7 +21,21 @@ export const liveLimit = <L extends { percentUsed: number; resetsAt?: string }>(
     : { ...limit, isReset: false }
 }
 
-export const thousands = (tokens: number): string => `${Math.round(tokens / 1000)}k`
+/**
+ * The windows in the account's usage answer (`/api/oauth/usage`, what the native panel reads), in the
+ * engine's shape: `utilization` is already a percent there.
+ */
+export const accountLimits = (body: unknown): SessionRateLimit[] => {
+  if (typeof body !== 'object' || body === null) return []
+  return (['five_hour', 'seven_day'] as const).flatMap(kind => {
+    const w = (body as Record<string, { utilization?: unknown; resets_at?: unknown } | null | undefined>)[kind]
+    if (!w || typeof w.utilization !== 'number') return []
+    const limit: SessionRateLimit = { kind, percentUsed: Math.round(w.utilization * 10) / 10 }
+    return [typeof w.resets_at === 'string' ? { ...limit, resetsAt: w.resets_at } : limit]
+  })
+}
+
+export const thousands =(tokens: number): string => `${Math.round(tokens / 1000)}k`
 
 /** Milliseconds the cache stays warm after a response at `at`; 0 once it has expired. */
 export const cacheLeft = (at: number, ttlMs: number, now: number): number => Math.max(0, at + ttlMs - now)
